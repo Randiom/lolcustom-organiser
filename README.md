@@ -35,7 +35,7 @@ Run `/lol test:8` (needs Manage Server) to fill a lobby with you plus 7 fake pla
 | `DEFAULT_RATING`, `TOLERANCE` | `1000`, `20` | unranked fallback, balancing randomness |
 
 ## Rank icons
-On startup the bot uploads the rank crests (Iron … Diamond, Master+) as application emojis and uses them next to every rank. Source per tier: `icons/<tier>.png` in the repo if you add one (e.g. `icons/gold.png`), otherwise the URL in `ICON_URL` (default: Community Dragon's `emblem-{tier}.png`). Emojis are only uploaded once. If a crest can't be loaded, that tier falls back to a coloured emoji. Check the console for `Rank crests loaded: 8/8`.
+The real crests ship in `icons/` (128px, from the wiki). On startup the bot uploads the rank crests (Iron … Diamond, Master+, Unranked) as application emojis and uses them next to every rank. Source per tier: `icons/<tier>.png`, otherwise the URL in `ICON_URL`. Emojis are only uploaded once. If a crest can't be loaded, that tier falls back to a coloured emoji. Check the console for `Rank crests loaded: 9/9`.
 
 Teams messages stay interactive for 12 hours (or until the bot restarts).
 

@@ -242,7 +242,7 @@ async function buildPlayers(ids) {
     else if (u?.puuid) {
       linked = true;
       const r = await getRank(u);
-      if (r.rating != null) { base = r.rating; label = r.label; icon = rankIcon(base); } else { label = 'Unranked*'; icon = '❔'; }
+      if (r.rating != null) { base = r.rating; label = r.label; icon = rankIcon(base); } else { label = 'Unranked*'; icon = unrankedIcon(); }
     }
     ps.push({ id, rating: base + (u?.adj || 0), label, icon, linked, roles: u?.roles || [], duo: u?.duo });
   }
@@ -340,8 +340,9 @@ const rowOf = (...c) => new ActionRowBuilder().addComponents(...c);
 // Layout: a slim header (title, balance, warnings) + one colour-coded card per team with a Role | Player | Rank table.
 const ROLE_ICON = { top: '🛡️', jungle: '🌲', mid: '🔮', bot: '🏹', support: '🩹' };
 const TIER_ICON = ['⚫', '🟤', '⚪', '🟡', '🔷', '🟢', '💎']; // fallback when crests aren't loaded: iron … diamond
-const CREST_TIERS = ['iron', 'bronze', 'silver', 'gold', 'platinum', 'emerald', 'diamond', 'master'];
+const CREST_TIERS = ['iron', 'bronze', 'silver', 'gold', 'platinum', 'emerald', 'diamond', 'master', 'unranked'];
 const crests = {}; // tier -> '<:lol_gold:123>' once uploaded as application emojis (see loadCrests)
+const unrankedIcon = () => crests.unranked || '❔';
 const tierOf = (r) => (r >= 2800 ? 7 : Math.min(6, Math.floor(Math.max(0, r) / 400)));
 const rankIcon = (r) => { const t = tierOf(r); return crests[CREST_TIERS[t]] || (t === 7 ? '🟣' : TIER_ICON[t]); };
 const emojiOf = (e) => { const m = /^<(a?):(\w+):(\d+)>$/.exec(e); return m ? { id: m[3], name: m[2], animated: !!m[1] } : e; }; // for select menus
