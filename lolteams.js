@@ -237,14 +237,14 @@ async function buildPlayers(ids) {
   const ps = [];
   for (const id of ids.slice().sort()) {
     const u = db.users[id];
-    let base = DEFAULT_RATING, label = '⚠ not linked*', linked = false;
-    if (u?.override != null) { base = u.override; label = `${ratingLabel(u.override)} (set)`; linked = true; }
+    let base = DEFAULT_RATING, label = 'not linked*', icon = '⚠️', linked = false;
+    if (u?.override != null) { base = u.override; label = `${ratingLabel(u.override)} (set)`; icon = rankIcon(base); linked = true; }
     else if (u?.puuid) {
       linked = true;
       const r = await getRank(u);
-      if (r.rating != null) { base = r.rating; label = r.label; } else label = 'Unranked*';
+      if (r.rating != null) { base = r.rating; label = r.label; icon = rankIcon(base); } else { label = 'Unranked*'; icon = '❔'; }
     }
-    ps.push({ id, rating: base + (u?.adj || 0), label, linked, roles: u?.roles || [], duo: u?.duo });
+    ps.push({ id, rating: base + (u?.adj || 0), label, icon, linked, roles: u?.roles || [], duo: u?.duo });
   }
   return ps;
 }
@@ -276,7 +276,7 @@ function fakePlayers(count, ownerId, withDuo) {
     const alts = ROLES.filter((r) => r !== main && Math.random() < 0.4);
     const duo = withDuo && i === 0; // your duo setting makes "Test 1" your partner
     return {
-      id: `test:${i + 1}`, name: `Test ${i + 1}${duo ? ' (your duo)' : ''}`, rating, label: `${ratingLabel(rating)} (test)`, linked: true,
+      id: `test:${i + 1}`, name: `Test ${i + 1}${duo ? ' 🤝' : ''}`, // 🤝 = your duo partner rating, label: `${ratingLabel(rating)} (test)`, icon: rankIcon(rating), linked: true,
       roles: Math.random() < 0.2 ? [] : [main, ...alts], duo: duo ? ownerId : undefined,
     };
   });
@@ -337,57 +337,74 @@ function teamVcs(guild) {
 const btn = (id, label, style) => new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(style);
 const rowOf = (...c) => new ActionRowBuilder().addComponents(...c);
 
+// Layout: a slim header (title, balance, warnings) + one colour-coded card per team with a Role | Player | Rank table.
+const ROLE_ICON = { top: '🛡️', jungle: '🌲', mid: '🔮', bot: '🏹', support: '🩹' };
+const TIER_ICON = ['⚫', '🟤', '⚪', '🟡', '🔷', '🟢', '💎']; // iron … diamond
+const rankIcon = (r) => (r >= 2800 ? '🟣' : TIER_ICON[Math.min(6, Math.floor(Math.max(0, r) / 400))]);
+const BLUE = 0x3b82f6, RED = 0xef4444, BLURPLE = 0x5865f2;
+
+function balanceLine(res) {
+  const d = res.diff.toFixed(0), edge = res.avg[0] > res.avg[1] ? '🔵' : '🔴';
+  return res.diff <= 30 ? `⚖️ **Even match** · Δ ${d} avg pts`
+    : res.diff <= 100 ? `⚖️ **Close** · slight edge to ${edge} · Δ ${d} avg pts`
+    : `⚖️ **Uneven** · ${edge} favoured · Δ ${d} avg pts`;
+}
+
+function teamEmbed(s, n) {
+  const { res, report: rep } = s, t = res.teams[n];
+  return new EmbedBuilder().setColor(n ? RED : BLUE)
+    .setTitle(`${rep?.winner === n ? '🏆' : n ? '🔴' : '🔵'} ${n ? 'Red' : 'Blue'} Team · ${ratingLabel(res.avg[n])} avg`)
+    .addFields(
+      { name: 'Role', value: t.map((p) => `${ROLE_ICON[p.role]} **${cap(p.role)}**`).join('\n'), inline: true },
+      { name: 'Player', value: t.map((p) => who(p)).join('\n'), inline: true },
+      { name: 'Rank', value: t.map((p) => `${p.icon} ${p.label}`).join('\n'), inline: true });
+}
+
 function renderTeams(s, canMove) {
   const { res, report: rep } = s;
-  const e = new EmbedBuilder().setColor(0x5865f2)
-    .setTitle((s.test ? '🧪 ' : '') + (rep ? `Teams · ${rep.winner ? '🔴 Red' : '🔵 Blue'} won` : s.drafted ? 'Teams · captain draft' : 'Teams'));
-  const notes = [];
+  const lines = [rep ? `🏆 **${rep.winner ? 'Red' : 'Blue'} won** · in-house rating: winners ${signed(rep.d)}, losers ${signed(-rep.d)}` : balanceLine(res)];
   if (res.unlinked.length) {
     const mentions = res.unlinked.map((id) => `<@${id}>`).join(' ');
-    notes.push(`⚠ ${mentions} ${res.unlinked.length > 1 ? "haven't" : "hasn't"} linked an account. Use /lol to link.`);
+    lines.push(`⚠️ ${mentions} ${res.unlinked.length > 1 ? "haven't" : "hasn't"} linked an account. Use /lol to link.`);
   }
-  if (res.duoIgnored) notes.push('⚠ Duo partners couldn\'t be kept together with this player count.');
-  if (notes.length) e.setDescription(notes.join('\n'));
-  ['🔵 Blue', '🔴 Red'].forEach((name, n) =>
-    e.addFields({
-      name: `${name} · avg ${ratingLabel(res.avg[n])}`,
-      value: res.teams[n].map((p) => `**${cap(p.role)}** ${who(p)} · ${p.label}`).join('\n'),
-    }));
-  e.setFooter({
-    text: (rep ? `In-house rating: winners ${signed(rep.d)}, losers ${signed(-rep.d)}`
-      : `Δ ${res.diff.toFixed(0)} avg pts` + (res.flagged ? ` · * counted as ${ratingLabel(DEFAULT_RATING)}` : ''))
-      + (s.test ? ' · practice lobby, not saved' : ''),
-  });
-  if (rep) return { embeds: [e], components: [rowOf(btn('undo', 'Undo result', ButtonStyle.Secondary))] };
+  if (res.duoIgnored) lines.push('⚠️ Duo partners couldn\'t be kept together with this player count.');
+  const head = new EmbedBuilder().setColor(BLURPLE).setDescription(lines.join('\n'))
+    .setTitle((s.test ? '🧪 ' : '') + (rep ? `Teams · ${rep.winner ? '🔴 Red' : '🔵 Blue'} won` : s.drafted ? 'Teams · captain draft' : 'Teams'));
+  const embeds = [head, teamEmbed(s, 0), teamEmbed(s, 1)];
+  const foot = [res.flagged && `* counted as ${ratingLabel(DEFAULT_RATING)}`, s.test && 'practice lobby, not saved'].filter(Boolean);
+  if (foot.length) embeds[2].setFooter({ text: foot.join(' · ') });
+
+  if (rep) return { embeds, components: [rowOf(btn('undo', 'Undo result', ButtonStyle.Secondary))] };
   const top = s.moved ? rowOf(btn('back', 'Move everyone back', ButtonStyle.Primary))
     : rowOf(btn('reroll', 'Reroll', ButtonStyle.Primary), btn('draft', 'Captain draft', ButtonStyle.Secondary),
       ...(canMove ? [btn('move', 'Move to team channels', ButtonStyle.Secondary)] : []));
-  return { embeds: [e], components: [top, rowOf(btn('win0', '🔵 Blue won', ButtonStyle.Secondary), btn('win1', '🔴 Red won', ButtonStyle.Secondary))] };
+  return { embeds, components: [top, rowOf(btn('win0', '🔵 Blue won', ButtonStyle.Secondary), btn('win1', '🔴 Red won', ButtonStyle.Secondary))] };
 }
 
 function renderDraft(s) {
-  const d = s.draft, c = draftCaptain(d);
-  const e = new EmbedBuilder().setColor(0x5865f2).setTitle(`${s.test ? '🧪 ' : ''}Captain draft`)
-    .setDescription(`${who(c)} picks next.`)
-    .addFields(['🔵 Blue', '🔴 Red'].map((name, n) => ({
-      name,
-      value: d.teams[n].map((p, i) => `${i ? '' : '👑 '}${who(p)} · ${p.label}`).join('\n'),
-    })));
-  const menu = new StringSelectMenuBuilder().setCustomId('pick').setPlaceholder('Pick a player')
+  const d = s.draft, c = draftCaptain(d), turn = pickTeam(d.j);
+  const head = new EmbedBuilder().setColor(turn ? RED : BLUE).setTitle(`${s.test ? '🧪 ' : ''}Captain draft`)
+    .setDescription(`${turn ? '🔴' : '🔵'} ${who(c)} **picks next** · ${d.pool.length} player${d.pool.length === 1 ? '' : 's'} left`);
+  const card = (n) => new EmbedBuilder().setColor(n ? RED : BLUE).setTitle(`${n ? '🔴 Red' : '🔵 Blue'} Team`)
+    .addFields(
+      { name: 'Player', value: d.teams[n].map((p, i) => `${i ? '▫️' : '👑'} ${who(p)}`).join('\n'), inline: true },
+      { name: 'Rank', value: d.teams[n].map((p) => `${p.icon} ${p.label}`).join('\n'), inline: true });
+  const menu = new StringSelectMenuBuilder().setCustomId('pick').setPlaceholder(`${turn ? '🔴' : '🔵'} Pick a player`)
     .addOptions(d.pool.map((p) => new StringSelectMenuOptionBuilder()
-      .setLabel((d.names[p.id] || p.id).slice(0, 100)).setDescription(p.label.replace('*', '')).setValue(p.id)));
-  return { embeds: [e], components: [rowOf(menu), rowOf(btn('cancel', 'Cancel draft', ButtonStyle.Secondary))] };
+      .setLabel((d.names[p.id] || p.id).slice(0, 100)).setDescription(p.label.replace('*', '')).setValue(p.id).setEmoji(p.icon)));
+  return { embeds: [head, card(0), card(1)], components: [rowOf(menu), rowOf(btn('cancel', 'Cancel draft', ButtonStyle.Secondary))] };
 }
 
 // ── rendering: leaderboard + personal panel ──────────────────────────────
 function boardEmbed() {
   const rows = Object.entries(db.users).map(([id, u]) => {
     const base = u.override ?? (u.puuid ? db.ranks[u.puuid]?.rating : null) ?? DEFAULT_RATING;
-    return { id, w: u.w || 0, l: u.l || 0, adj: u.adj || 0, rating: base + (u.adj || 0) };
+    return { id, w: u.w || 0, l: u.l || 0, adj: u.adj || 0, base, rating: base + (u.adj || 0) };
   }).filter((r) => r.w + r.l > 0).sort((a, b) => b.rating - a.rating || b.w - a.w).slice(0, 10);
-  return new EmbedBuilder().setColor(0x5865f2).setTitle('In-house leaderboard')
+  const medal = ['🥇', '🥈', '🥉'];
+  return new EmbedBuilder().setColor(0xf1c40f).setTitle('🏆 In-house leaderboard')
     .setDescription(rows.length
-      ? rows.map((r, i) => `**${i + 1}.** <@${r.id}> · ${ratingLabel(r.rating)} (${signed(r.adj)}) · ${r.w}W ${r.l}L`).join('\n')
+      ? rows.map((r, i) => `${medal[i] ?? `**${i + 1}.**`} <@${r.id}> · ${rankIcon(r.base)} ${ratingLabel(r.rating)} (${signed(r.adj)}) · **${r.w}**W **${r.l}**L`).join('\n')
       : 'No results yet. Press 🔵 Blue won or 🔴 Red won on a teams message after a game.')
     .setFooter({ text: 'Rating = Riot rank + in-house adjustment' });
 }

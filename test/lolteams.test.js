@@ -412,6 +412,35 @@ test('Make teams posts the embed, keeps a session, and links back from the panel
   assert.equal(list.length, 10);
 });
 
+test('teams view: header + two colour-coded cards with Role | Player | Rank tables, icons, winner trophy', async () => {
+  const { s } = await startTeams(10);
+  const [head, blue, red] = m.renderTeams(s, false).embeds.map((e) => e.toJSON());
+  assert.match(head.description, /Even match|Close|Uneven/);
+  assert.ok(head.color !== blue.color && blue.color !== red.color);
+  for (const [card, n] of [[blue, 0], [red, 1]]) {
+    assert.deepEqual(card.fields.map((f) => f.name), ['Role', 'Player', 'Rank']);
+    assert.ok(card.fields.every((f) => f.inline && f.value.split('\n').length === 5)); // one line per player so rows align
+    assert.match(card.fields[0].value, /🛡️ \*\*Top\*\*\n🌲 \*\*Jungle\*\*\n🔮 \*\*Mid\*\*\n🏹 \*\*Bot\*\*\n🩹 \*\*Support\*\*/);
+    assert.match(card.fields[2].value, /^(⚫|🟤|⚪|🟡|🔷|🟢|💎|🟣)/);
+    assert.match(card.title, new RegExp(`${n ? 'Red' : 'Blue'} Team · .+ avg`));
+  }
+  s.report = m.applyResult(s.res, 1, true);
+  const done = m.renderTeams(s, false).embeds.map((e) => e.toJSON());
+  assert.match(done[2].title, /^🏆 Red Team/);
+  assert.match(done[1].title, /^🔵 Blue Team/);
+  assert.match(done[0].description, /Red won/);
+});
+
+test('rank icons: tiers, apex, unranked and unlinked players', async () => {
+  reset();
+  db.users[U(1)] = { override: 100 };            // iron
+  db.users[U(2)] = { override: 1500 };           // gold
+  db.users[U(3)] = { override: 2900 };           // master+
+  db.users[U(4)] = { puuid: 'P2', region: 'na', name: 'Foo', tag: 'NA1' }; // linked, unranked
+  const ps = await m.buildPlayers([U(1), U(2), U(3), U(4), U(5)]);
+  assert.deepEqual(ps.map((p) => p.icon), ['⚫', '🟡', '🟣', '❔', '⚠️']);
+});
+
 test('Make teams without team channels hides the move button; unlinked players are called out', async () => {
   const { w } = await startTeams(4, { teamChannels: false });
   const labels = w.posted[0].components.flatMap((r) => r.toJSON().components.map((c) => c.label));
@@ -537,7 +566,8 @@ test('leaderboard: ranked by rank + adjustment, only players with games, empty s
   const order = [U(4), U(2), U(1)].map((id) => text.indexOf(`<@${id}>`));
   assert.ok(order.every((x) => x > 0) && order[0] < order[1] && order[1] < order[2], text);
   assert.ok(!text.includes(`<@${U(3)}>`));
-  assert.match(text, /3W 1L/);
+  assert.match(text, /\*\*3\*\*W \*\*1\*\*L/);
+  assert.match(text, /🥇/);
   assert.match(text, /\+40/);
   assert.match(text, /−30/);
 });
@@ -719,7 +749,7 @@ test('practice lobby: your duo setting makes Test 1 your partner, always on your
     const { s } = await startPractice(8, { duo: U(2) }); // U(2) isn't in the lobby; Test 1 stands in
     const side = (id) => s.res.teams.findIndex((t) => t.some((p) => p.id === id));
     assert.equal(side('test:1'), side(U(1)));
-    assert.match(s.names['test:1'], /your duo/);
+    assert.match(s.names['test:1'], /🤝/);
   }
 });
 
