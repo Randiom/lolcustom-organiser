@@ -338,9 +338,10 @@ const btn = (id, label, style) => new ButtonBuilder().setCustomId(id).setLabel(l
 const rowOf = (...c) => new ActionRowBuilder().addComponents(...c);
 
 // Layout: a slim header (title, balance, warnings) + one colour-coded card per team with a Role | Player | Rank table.
-const ROLE_ICON = { top: '🛡️', jungle: '🌲', mid: '🔮', bot: '🏹', support: '🩹' };
+const ROLE_FALLBACK = { top: '🛡️', jungle: '🌲', mid: '🔮', bot: '🏹', support: '🩹' };
+const ROLE_ICON = new Proxy({}, { get: (_, r) => crests[`role_${r}`] || ROLE_FALLBACK[r] }); // real position icons once loaded
 const TIER_ICON = ['⚫', '🟤', '⚪', '🟡', '🔷', '🟢', '💎']; // fallback when crests aren't loaded: iron … diamond
-const CREST_TIERS = ['iron', 'bronze', 'silver', 'gold', 'platinum', 'emerald', 'diamond', 'master', 'unranked'];
+const CREST_TIERS = ['iron', 'bronze', 'silver', 'gold', 'platinum', 'emerald', 'diamond', 'master', 'unranked', 'role_top', 'role_jungle', 'role_mid', 'role_bot', 'role_support'];
 const crests = {}; // tier -> '<:lol_gold:123>' once uploaded as application emojis (see loadCrests)
 const BANNER = `${__dirname}/icons/banner.png`;
 const unrankedIcon = () => crests.unranked || '❔';
@@ -360,7 +361,7 @@ async function loadCrests(app) {
       let e = have.get(name);
       if (!e) {
         const local = `${__dirname}/icons/${t}.png`;
-        const attachment = fs.existsSync(local) ? local : Buffer.from(await (await fetch(base.replace('{tier}', t))).arrayBuffer());
+        const attachment = fs.existsSync(local) ? local : t.startsWith('role_') ? (() => { throw new Error('icons/' + t + '.png missing'); })() : Buffer.from(await (await fetch(base.replace('{tier}', t))).arrayBuffer());
         e = await app.emojis.create({ attachment, name });
       }
       crests[t] = `<:${e.name}:${e.id}>`;
