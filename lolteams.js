@@ -479,12 +479,18 @@ function start() {
   });
 
   client.on(Events.InteractionCreate, async (i) => {
+    const age = Date.now() - i.createdTimestamp; // ms since the click; Discord allows 3000 for the first reply
     try {
       if (i.isChatInputCommand()) await onCommand(i);
       else if (i.isModalSubmit()) await onModal(i);
       else if (i.isStringSelectMenu()) await onPanel(i);
       else if (i.isButton()) await (i.customId.startsWith('lol:') ? onPanel(i) : onTeamButton(i));
     } catch (e) {
+      if (e.code === 10062) { // reply window missed, or another running copy of the bot answered first
+        console.warn(`Unknown interaction (age ${age}ms when received, gateway ping ${client.ws.ping}ms). ` +
+          (age > 2000 ? 'Event arrived late: slow host or clock skew.' : 'Arrived in time: another copy of the bot is probably running.'));
+        return;
+      }
       console.error(e);
       const content = `Error: ${riotErr(e)}`;
       const send = i.deferred || i.replied ? i.followUp({ content, flags: EPH }) : i.reply({ content, flags: EPH });
