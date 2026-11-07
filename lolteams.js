@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// lolteams.js — Discord bot: link Riot accounts, split a voice channel into two rank-balanced teams.
-// One slash command (/lol) opens a personal (ephemeral) panel: link account, roles, rank override, make teams.
-// Setup: npm i discord.js   (Node 18+)
+// lolteams.js — Discord bot for League of Legends custom games: link Riot accounts, rank-balanced teams,
+// captain drafts, duo partners, win/loss tracking with an in-house leaderboard.
+// One slash command (/lol) opens a personal (ephemeral) panel; teams are posted in the channel with buttons.
+// Setup: npm i discord.js   (Node 20.12+)
 // Run:   DISCORD_TOKEN=... RIOT_KEY=... [GUILD_ID=...]  (or put them in a .env file) [DEFAULT_REGION=euw] [TEAM1_VC=...] [TEAM2_VC=...] node lolteams.js
-// Bot invite scopes: bot + applications.commands. Permissions: View Channel, Send Messages, Move Members.
+// Bot invite scopes: bot + applications.commands. Permissions: View Channel, Send Messages, Embed Links, Connect, Move Members.
 // "Move to team channels" works out of the box if the server has voice channels with "blue" and "red" in their names
 // (or set TEAM1_VC / TEAM2_VC channel IDs).
 'use strict';
@@ -12,7 +13,7 @@ const fs = require('fs');
 const {
   Client, Events, GatewayIntentBits, MessageFlags, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder,
-  StringSelectMenuOptionBuilder, PermissionFlagsBits, SlashCommandBuilder,
+  StringSelectMenuOptionBuilder, UserSelectMenuBuilder, PermissionFlagsBits, SlashCommandBuilder,
 } = require('discord.js');
 
 // ── config ───────────────────────────────────────────────────────────────
@@ -22,6 +23,9 @@ const RANK_TTL = (+process.env.RANK_TTL_HOURS || 24) * 3600e3; // rank cache lif
 const FRESH = 30 * 60e3;                                       // opening /lol refreshes your own rank if older than this
 const DEFAULT_RATING = +process.env.DEFAULT_RATING || 1000;    // unranked / unlinked (= Silver II)
 const TOLERANCE = +process.env.TOLERANCE || 20;                // avg-rating slack for random split choice
+const ELO_K = 24;                                              // in-house rating swing per reported game
+const ADJ_MAX = 300;                                           // in-house adjustment is clamped to ±this
+const SESSION_TTL = 12 * 3600e3;                               // teams message stays interactive this long (memory only)
 const EPH = MessageFlags.Ephemeral;
 
 // region -> [platform host, regional host]
@@ -37,10 +41,11 @@ const APEX = new Set(['MASTER', 'GRANDMASTER', 'CHALLENGER']);
 const DIVS = ['IV', 'III', 'II', 'I'];
 const cap = (s) => s[0].toUpperCase() + s.slice(1).toLowerCase();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const signed = (n) => `${n < 0 ? '−' : '+'}${Math.abs(n)}`;
 
 // ── storage (one JSON file, atomic write) ────────────────────────────────
-// users[discordId] = { puuid, region, name, tag, override?, roles? }   ranks[puuid] = { at, rating, label }
-// roles = [main, ...alsoOk]; [] = fill; undefined = never set
+// users[discordId] = { puuid, region, name, tag, override?, roles?, duo?, w?, l?, adj? }   ranks[puuid] = { at, rating, label }
+// roles = [main, ...alsoOk]; [] = fill; undefined = never set.  adj = in-house rating adjustment from reported results.
 let db = { users: {}, ranks: {} };
 try { db = { ...db, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) }; } catch {}
 function save() {
@@ -75,6 +80,7 @@ function toRating(e) {
   return TIERS.indexOf(e.tier) * 400 + DIVS.indexOf(e.rank) * 100 + e.leaguePoints;
 }
 function ratingLabel(r) {
+  r = Math.max(0, r);
   if (r >= 2800) return `Master+ ${Math.round(r - 2800)}LP`;
   return `${cap(TIERS[Math.floor(r / 400)])} ${DIVS[Math.floor((r % 400) / 100)]}`;
 }
@@ -161,27 +167,46 @@ function parseRank(s) {
 }
 
 // ── balancing ────────────────────────────────────────────────────────────
-// Brute-force every split, pick randomly among those within TOLERANCE of the best (never `avoid` if possible).
+// Duo partners form one unit that is never split. A duo only counts when both are present.
+function toUnits(ps) {
+  const by = new Map(ps.map((p) => [p.id, p]));
+  const used = new Set(), units = [];
+  for (const p of ps) {
+    if (used.has(p.id)) continue;
+    used.add(p.id);
+    const mate = [p.duo, ...ps.filter((x) => x.duo === p.id).map((x) => x.id)]
+      .map((id) => by.get(id)).find((x) => x && !used.has(x.id));
+    if (mate) { used.add(mate.id); units.push([p, mate]); } else units.push([p]);
+  }
+  return units;
+}
+function enumerate(units, n, total) { // every way to give team A exactly n>>1 players, whole units only
+  const k = n >> 1, out = [];
+  for (let mask = 1; mask < 1 << units.length; mask++) {
+    if (n % 2 === 0 && !(mask & 1)) continue; // skip mirrored duplicates: A holds the first unit
+    const a = [];
+    units.forEach((u, b) => { if (mask >> b & 1) a.push(...u); });
+    if (a.length !== k) continue;
+    const sa = a.reduce((s, p) => s + p.rating, 0);
+    out.push({ a, key: a.map((p) => p.id).sort().join(','), diff: Math.abs(sa / k - (total - sa) / (n - k)) });
+  }
+  return out;
+}
+// Pick randomly among the splits within TOLERANCE of the best one (never `avoid` if another exists).
 function pickSplit(ps, avoid) {
-  const n = ps.length, k = n >> 1;
-  const total = ps.reduce((sum, p) => sum + p.rating, 0);
-  const all = [], idx = [];
-  (function rec(from) {
-    if (idx.length === k) {
-      if (n % 2 === 0 && idx[0] !== 0) return; // skip mirrored duplicates
-      const sa = idx.reduce((sum, i) => sum + ps[i].rating, 0);
-      all.push({ a: idx.slice(), diff: Math.abs(sa / k - (total - sa) / (n - k)) });
-      return;
-    }
-    for (let i = from; i < n; i++) { idx.push(i); rec(i + 1); idx.pop(); }
-  })(0);
-  for (const x of all) x.key = x.a.map((i) => ps[i].id).join(',');
+  const n = ps.length, total = ps.reduce((s, p) => s + p.rating, 0);
+  let units = toUnits(ps), duoIgnored = false;
+  let all = enumerate(units, n, total);
+  if (!all.length) { // duos made an exact split impossible, so ignore them
+    duoIgnored = units.some((u) => u.length > 1);
+    all = enumerate(ps.map((p) => [p]), n, total);
+  }
   all.sort((x, y) => x.diff - y.diff);
   const lim = all[0].diff + TOLERANCE;
   let pool = all.filter((x) => x.diff <= lim && x.key !== avoid);
   if (!pool.length) { const fresh = all.filter((x) => x.key !== avoid); pool = fresh.length ? [fresh[0]] : [all[0]]; }
   const pick = pool[(Math.random() * pool.length) | 0];
-  return { A: pick.a.map((i) => ps[i]), B: ps.filter((_, i) => !pick.a.includes(i)), key: pick.key, diff: pick.diff };
+  return { A: pick.a, B: ps.filter((p) => !pick.a.includes(p)), key: pick.key, diff: pick.diff, duoIgnored };
 }
 
 // roles = [main, ...alsoOk]: main 0, also-ok 1, other 5, fill 1.5
@@ -207,29 +232,80 @@ function assignRoles(team) {
   return t.map((p, i) => ({ ...p, role: best[i] })).sort((x, y) => ROLES.indexOf(x.role) - ROLES.indexOf(y.role));
 }
 
-async function makeTeams(ids, avoid) {
-  ids = ids.slice().sort();
+// everything the balancer and draft need to know about each player (rating = rank + in-house adjustment)
+async function buildPlayers(ids) {
   const ps = [];
-  for (const id of ids) {
+  for (const id of ids.slice().sort()) {
     const u = db.users[id];
-    let rating = DEFAULT_RATING, label = '⚠ not linked*', linked = false;
-    if (u?.override != null) { rating = u.override; label = `${ratingLabel(u.override)} (set)`; linked = true; }
+    let base = DEFAULT_RATING, label = '⚠ not linked*', linked = false;
+    if (u?.override != null) { base = u.override; label = `${ratingLabel(u.override)} (set)`; linked = true; }
     else if (u?.puuid) {
       linked = true;
       const r = await getRank(u);
-      if (r.rating != null) { rating = r.rating; label = r.label; } else label = 'Unranked*';
+      if (r.rating != null) { base = r.rating; label = r.label; } else label = 'Unranked*';
     }
-    ps.push({ id, rating, label, linked, roles: u?.roles || [] });
+    ps.push({ id, rating: base + (u?.adj || 0), label, linked, roles: u?.roles || [], duo: u?.duo });
   }
-  let { A, B, key, diff } = pickSplit(ps, avoid);
-  if (Math.random() < 0.5) [A, B] = [B, A]; // random side
+  return ps;
+}
+function compose(ps, A, B, key) {
   const teams = [assignRoles(A), assignRoles(B)];
   const avg = teams.map((t) => t.reduce((s, p) => s + p.rating, 0) / t.length);
   return {
-    teams, avg, diff, key,
+    teams, avg, diff: Math.abs(avg[0] - avg[1]), key, duoIgnored: false,
     flagged: ps.some((p) => p.label.endsWith('*')),
     unlinked: ps.filter((p) => !p.linked).map((p) => p.id),
   };
+}
+async function makeTeams(ids, avoid) {
+  const ps = await buildPlayers(ids);
+  let { A, B, key, duoIgnored } = pickSplit(ps, avoid);
+  if (Math.random() < 0.5) [A, B] = [B, A]; // random side
+  const res = compose(ps, A, B, key);
+  res.duoIgnored = duoIgnored;
+  return res;
+}
+
+// ── captain draft: two highest-rated players captain, the lower-rated one picks first, snake order ──
+const pickTeam = (j) => ((j + 1) >> 1) % 2; // pick j goes to team 0,1,1,0,0,1,1,0…
+function startDraft(ps, names) {
+  const sorted = ps.slice().sort(() => Math.random() - 0.5).sort((a, b) => b.rating - a.rating); // random tiebreak
+  return { all: ps, names, pool: sorted.slice(2), teams: [[sorted[1]], [sorted[0]]], j: 0 };
+}
+const draftCaptain = (d) => d.teams[pickTeam(d.j)][0];
+function draftPick(d, id) {
+  const idx = d.pool.findIndex((p) => p.id === id);
+  if (idx < 0) return false;
+  d.teams[pickTeam(d.j)].push(d.pool.splice(idx, 1)[0]); d.j++;
+  if (d.pool.length === 1) { d.teams[pickTeam(d.j)].push(d.pool.pop()); d.j++; } // last player is forced
+  return true;
+}
+
+// ── results: Elo-style in-house adjustment on top of rank ────────────────
+function applyResult(res, winner) {
+  const E = 1 / (1 + 10 ** ((res.avg[1 - winner] - res.avg[winner]) / 400)); // winner's expected score
+  const d = Math.max(1, Math.round(ELO_K * (1 - E)));
+  const report = { winner, d, deltas: {}, won: res.teams[winner].map((p) => p.id), lost: res.teams[1 - winner].map((p) => p.id) };
+  const bump = (id, won) => {
+    const u = (db.users[id] ||= {}), before = u.adj || 0;
+    u.adj = Math.max(-ADJ_MAX, Math.min(ADJ_MAX, before + (won ? d : -d)));
+    u[won ? 'w' : 'l'] = (u[won ? 'w' : 'l'] || 0) + 1;
+    report.deltas[id] = u.adj - before;
+  };
+  report.won.forEach((id) => bump(id, true));
+  report.lost.forEach((id) => bump(id, false));
+  save();
+  return report;
+}
+function undoResult(report) {
+  for (const id of [...report.won, ...report.lost]) {
+    const u = db.users[id];
+    if (!u) continue;
+    u.adj = (u.adj || 0) - report.deltas[id];
+    const k = report.won.includes(id) ? 'w' : 'l';
+    u[k] = Math.max(0, (u[k] || 0) - 1);
+  }
+  save();
 }
 
 // ── team voice channels: env IDs, else channels named "...blue..." / "...red..." ──
@@ -241,29 +317,62 @@ function teamVcs(guild) {
 
 // ── rendering: public teams message ──────────────────────────────────────
 const btn = (id, label, style) => new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(style);
+const rowOf = (...c) => new ActionRowBuilder().addComponents(...c);
 
-function renderTeams(res, canMove, moved) {
-  const e = new EmbedBuilder().setTitle('Teams').setColor(0x5865f2);
+function renderTeams(s, canMove) {
+  const { res, report: rep } = s;
+  const e = new EmbedBuilder().setColor(0x5865f2)
+    .setTitle(rep ? `Teams · ${rep.winner ? '🔴 Red' : '🔵 Blue'} won` : s.drafted ? 'Teams · captain draft' : 'Teams');
+  const notes = [];
   if (res.unlinked.length) {
     const who = res.unlinked.map((id) => `<@${id}>`).join(' ');
-    e.setDescription(`⚠ ${who} ${res.unlinked.length > 1 ? "haven't" : "hasn't"} linked an account. Use /lol to link.`);
+    notes.push(`⚠ ${who} ${res.unlinked.length > 1 ? "haven't" : "hasn't"} linked an account. Use /lol to link.`);
   }
+  if (res.duoIgnored) notes.push('⚠ Duo partners couldn\'t be kept together with this player count.');
+  if (notes.length) e.setDescription(notes.join('\n'));
   ['🔵 Blue', '🔴 Red'].forEach((name, n) =>
     e.addFields({
       name: `${name} · avg ${ratingLabel(res.avg[n])}`,
       value: res.teams[n].map((p) => `**${cap(p.role)}** <@${p.id}> · ${p.label}`).join('\n'),
     }));
-  e.setFooter({ text: `Δ ${res.diff.toFixed(0)} avg pts` + (res.flagged ? ` · * counted as ${ratingLabel(DEFAULT_RATING)}` : '') });
-  const row = new ActionRowBuilder();
-  if (moved) row.addComponents(btn('back', 'Move everyone back', ButtonStyle.Primary));
-  else {
-    row.addComponents(btn('reroll', 'Reroll', ButtonStyle.Primary));
-    if (canMove) row.addComponents(btn('move', 'Move to team channels', ButtonStyle.Secondary));
-  }
-  return { embeds: [e], components: [row] };
+  e.setFooter({
+    text: rep ? `In-house rating: winners ${signed(rep.d)}, losers ${signed(-rep.d)}`
+      : `Δ ${res.diff.toFixed(0)} avg pts` + (res.flagged ? ` · * counted as ${ratingLabel(DEFAULT_RATING)}` : ''),
+  });
+  if (rep) return { embeds: [e], components: [rowOf(btn('undo', 'Undo result', ButtonStyle.Secondary))] };
+  const top = s.moved ? rowOf(btn('back', 'Move everyone back', ButtonStyle.Primary))
+    : rowOf(btn('reroll', 'Reroll', ButtonStyle.Primary), btn('draft', 'Captain draft', ButtonStyle.Secondary),
+      ...(canMove ? [btn('move', 'Move to team channels', ButtonStyle.Secondary)] : []));
+  return { embeds: [e], components: [top, rowOf(btn('win0', '🔵 Blue won', ButtonStyle.Secondary), btn('win1', '🔴 Red won', ButtonStyle.Secondary))] };
 }
 
-// ── rendering: personal panel (ephemeral) ────────────────────────────────
+function renderDraft(s) {
+  const d = s.draft, c = draftCaptain(d);
+  const e = new EmbedBuilder().setColor(0x5865f2).setTitle('Captain draft')
+    .setDescription(`<@${c.id}> picks next.`)
+    .addFields(['🔵 Blue', '🔴 Red'].map((name, n) => ({
+      name,
+      value: d.teams[n].map((p, i) => `${i ? '' : '👑 '}<@${p.id}> · ${p.label}`).join('\n'),
+    })));
+  const menu = new StringSelectMenuBuilder().setCustomId('pick').setPlaceholder('Pick a player')
+    .addOptions(d.pool.map((p) => new StringSelectMenuOptionBuilder()
+      .setLabel((d.names[p.id] || p.id).slice(0, 100)).setDescription(p.label.replace('*', '')).setValue(p.id)));
+  return { embeds: [e], components: [rowOf(menu), rowOf(btn('cancel', 'Cancel draft', ButtonStyle.Secondary))] };
+}
+
+// ── rendering: leaderboard + personal panel ──────────────────────────────
+function boardEmbed() {
+  const rows = Object.entries(db.users).map(([id, u]) => {
+    const base = u.override ?? (u.puuid ? db.ranks[u.puuid]?.rating : null) ?? DEFAULT_RATING;
+    return { id, w: u.w || 0, l: u.l || 0, adj: u.adj || 0, rating: base + (u.adj || 0) };
+  }).filter((r) => r.w + r.l > 0).sort((a, b) => b.rating - a.rating || b.w - a.w).slice(0, 10);
+  return new EmbedBuilder().setColor(0x5865f2).setTitle('In-house leaderboard')
+    .setDescription(rows.length
+      ? rows.map((r, i) => `**${i + 1}.** <@${r.id}> · ${ratingLabel(r.rating)} (${signed(r.adj)}) · ${r.w}W ${r.l}L`).join('\n')
+      : 'No results yet. Press 🔵 Blue won or 🔴 Red won on a teams message after a game.')
+    .setFooter({ text: 'Rating = Riot rank + in-house adjustment' });
+}
+
 function panel(tid, notice) {
   const u = db.users[tid] || {};
   const rk = u.puuid ? db.ranks[u.puuid] : null;
@@ -274,8 +383,9 @@ function panel(tid, notice) {
   const accountLine = linked
     ? `[**${u.name}#${u.tag}**](https://op.gg/lol/summoners/${u.region}/${encodeURIComponent(u.name)}-${encodeURIComponent(u.tag)})\n${u.region.toUpperCase()}`
     : 'Not linked';
-  const rankLine = u.override != null ? `${ratingLabel(u.override)} (manual)`
-    : rk ? `${rk.label}\n<t:${Math.floor(rk.at / 1000)}:R>` : '—';
+  const record = u.w || u.l ? `\nIn-house ${u.w || 0}W ${u.l || 0}L (${signed(u.adj || 0)})` : '';
+  const rankLine = (u.override != null ? `${ratingLabel(u.override)} (manual)`
+    : rk ? `${rk.label}\n<t:${Math.floor(rk.at / 1000)}:R>` : '—') + record;
   const roleLine = !roles ? 'Not set (fill)' : !roles.length ? 'Fill'
     : cap(main) + (roles.length > 1 ? `\nalso ${roles.slice(1).map(cap).join(', ')}` : '');
   const hint = !linked && u.override == null ? 'Start with Link account.'
@@ -290,26 +400,31 @@ function panel(tid, notice) {
       { name: 'Roles', value: roleLine, inline: true })
     .setFooter({ text: hint });
 
-  // actions first (state-aware emphasis), role pickers below
+  // actions first (state-aware emphasis), pickers below
   const link = btn(`lol:link:${tid}`, linked ? 'Change account' : 'Link account', linked ? ButtonStyle.Secondary : ButtonStyle.Primary);
   const rank = btn(`lol:rank:${tid}`, 'Set rank', ButtonStyle.Secondary);
   const teams = btn(`lol:teams:${tid}`, 'Make teams', linked ? ButtonStyle.Success : ButtonStyle.Secondary);
   const unlink = btn(`lol:unlink:${tid}`, 'Unlink', ButtonStyle.Danger);
-  const rows = [new ActionRowBuilder().addComponents(...(linked ? [teams, link, rank, unlink] : [link, rank, teams]))];
+  const board = btn(`lol:board:${tid}`, 'Leaderboard', ButtonStyle.Secondary);
+  const rows = [rowOf(...(linked ? [teams, link, rank, unlink, board] : [link, rank, teams, board]))];
 
-  rows.push(new ActionRowBuilder().addComponents(
+  rows.push(rowOf(
     new StringSelectMenuBuilder().setCustomId(`lol:main:${tid}`).setPlaceholder('Main role')
       .addOptions([...ROLES, 'fill'].map((r) => new StringSelectMenuOptionBuilder()
         .setLabel(r === 'fill' ? 'Fill (any role)' : cap(r)).setValue(r)
         .setDefault(roles ? (r === 'fill' ? !roles.length : r === main) : false)))));
   if (main) {
     const opts = ROLES.filter((r) => r !== main);
-    rows.push(new ActionRowBuilder().addComponents(
+    rows.push(rowOf(
       new StringSelectMenuBuilder().setCustomId(`lol:alt:${tid}`).setPlaceholder('Also OK with…')
         .setMinValues(0).setMaxValues(opts.length)
         .addOptions(opts.map((r) => new StringSelectMenuOptionBuilder()
           .setLabel(cap(r)).setValue(r).setDefault(roles.includes(r))))));
   }
+  const duo = new UserSelectMenuBuilder().setCustomId(`lol:duo:${tid}`).setPlaceholder('Duo partner (optional)')
+    .setMinValues(0).setMaxValues(1);
+  if (u.duo) duo.setDefaultUsers(u.duo);
+  rows.push(rowOf(duo));
   return { embeds: [e], components: rows };
 }
 
@@ -333,11 +448,12 @@ const commands = [
   new SlashCommandBuilder().setName('lol').setDescription('Your LoL profile and team maker')
     .addUserOption((o) => o.setName('user').setDescription('Edit someone else (needs Manage Server)')),
 ];
-const canEdit = (i, tid) => i.user.id === tid || !!i.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
+const isAdmin = (i) => !!i.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
+const canEdit = (i, tid) => i.user.id === tid || isAdmin(i);
 const humans = (vc) => [...vc.members.values()].filter((m) => !m.user.bot).map((m) => m.id);
 const riotErr = (e) => (e.status === 403 ? 'Riot API key is invalid or expired.' : `Riot error: ${e.message}`);
 const NOPE = { content: 'You need Manage Server to edit someone else.', flags: EPH };
-const sessions = new Map(); // public teams message id -> { vcId, res, moved, t }
+const sessions = new Map(); // public teams message id -> { vcId, res, moved, drafted, draft, report, t }
 
 async function onCommand(i) {
   const tid = i.options.getUser('user')?.id ?? i.user.id;
@@ -364,6 +480,15 @@ async function onPanel(i) { // buttons + selects on the ephemeral panel
     if (rec.roles?.[0]) { rec.roles = [rec.roles[0], ...i.values]; save(); }
     return i.update(panel(tid));
   }
+  if (act === 'duo') {
+    const v = i.values[0]; // undefined when cleared
+    if (v && (v === tid || i.users?.get(v)?.bot)) return i.update(panel(tid, '⚠ Pick someone else.'));
+    const rec = (db.users[tid] ||= {});
+    if (v) rec.duo = v; else delete rec.duo;
+    save();
+    return i.update(panel(tid, v ? `✅ You'll be on the same team as <@${v}> when you're both in the channel.` : '✅ Duo cleared.'));
+  }
+  if (act === 'board') return i.reply({ embeds: [boardEmbed()], flags: EPH });
   if (act === 'link') return i.showModal(linkModal(tid));
   if (act === 'rank') return i.showModal(rankModal(tid));
   if (act === 'unlink') {
@@ -379,15 +504,15 @@ async function onPanel(i) { // buttons + selects on the ephemeral panel
     if (ids.length < 2) return i.update(panel(tid, '⚠ Need at least 2 people in the channel.'));
     if (ids.length > 10) return i.update(panel(tid, '⚠ Max 10 players.'));
     await i.deferUpdate();
-    const res = await makeTeams(ids);
+    const s = { vcId: vc.id, res: await makeTeams(ids), moved: false, t: Date.now() };
     try {
       const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
-      const msg = await ch.send(renderTeams(res, !!teamVcs(i.guild), false));
-      sessions.set(msg.id, { vcId: vc.id, res, moved: false, t: Date.now() });
+      const msg = await ch.send(renderTeams(s, !!teamVcs(i.guild)));
+      sessions.set(msg.id, s);
       return i.editReply(panel(tid, `✅ [Teams posted](${msg.url}).`));
     } catch (e) {
       console.error(e);
-      return i.editReply(panel(tid, '⚠ Couldn\'t post in this channel. The bot needs Send Messages here.'));
+      return i.editReply(panel(tid, '⚠ Couldn\'t post in this channel. The bot needs Send Messages and Embed Links here.'));
     }
   }
 }
@@ -409,10 +534,16 @@ async function onModal(i) {
         if (!acc) notice = `⚠ Riot ID not found on ${region.toUpperCase()}.` + (p.region ? '' : ' Playing elsewhere? Paste your op.gg link.');
         else if (dupe) notice = `⚠ That account is already linked to <@${dupe[0]}>.`;
         else {
-          const u = (db.users[tid] = { ...(db.users[tid] || {}), puuid: acc.puuid, region, name: acc.gameName, tag: acc.tagLine });
-          save();
-          const r = await getRank(u, true);
-          notice = `✅ Linked **${acc.gameName}#${acc.tagLine}** · ${r.label}`;
+          // account lookup works for every region, so check the player really exists on this one (404 = no); other errors don't block
+          const here = await riot(REGIONS[region][0], `/lol/summoner/v4/summoners/by-puuid/${acc.puuid}`).catch(() => ({}));
+          if (here === null) {
+            notice = `⚠ ${acc.gameName}#${acc.tagLine} has no League account on ${region.toUpperCase()}.` + (p.region ? '' : ' Playing elsewhere? Paste your op.gg link.');
+          } else {
+            const u = (db.users[tid] = { ...(db.users[tid] || {}), puuid: acc.puuid, region, name: acc.gameName, tag: acc.tagLine });
+            save();
+            const r = await getRank(u, true);
+            notice = `✅ Linked **${acc.gameName}#${acc.tagLine}** · ${r.label}`;
+          }
         }
       }
     } else if (act === 'rankm') {
@@ -429,25 +560,68 @@ async function onModal(i) {
   return i.editReply(panel(tid, notice));
 }
 
-async function onTeamButton(i) { // buttons on the public teams message
+async function onTeamButton(i) { // buttons + the draft menu on the public teams message
   const s = sessions.get(i.message.id);
   if (!s) return i.reply({ content: 'Expired. Run /lol and press Make teams again.', flags: EPH });
-  const vcs = teamVcs(i.guild);
+  s.t = Date.now();
+  const id = i.customId, vcs = teamVcs(i.guild);
+  const mayReport = s.res.teams.flat().some((p) => p.id === i.user.id) || isAdmin(i);
+  const noReport = { content: 'Only players in this match (or Manage Server) can do that.', flags: EPH };
+
+  if (id === 'win0' || id === 'win1') { // players may report after leaving voice
+    if (!mayReport) return i.reply(noReport);
+    if (s.report) return i.reply({ content: 'Result already reported.', flags: EPH });
+    if (s.draft) return i.reply({ content: 'Finish or cancel the draft first.', flags: EPH });
+    s.report = applyResult(s.res, id === 'win1' ? 1 : 0);
+    return i.update(renderTeams(s, !!vcs));
+  }
+  if (id === 'undo') {
+    if (!mayReport) return i.reply(noReport);
+    if (!s.report) return i.reply({ content: 'Nothing to undo.', flags: EPH });
+    undoResult(s.report); s.report = null;
+    return i.update(renderTeams(s, !!vcs));
+  }
+  if (id === 'pick') {
+    const d = s.draft;
+    if (!d) return i.reply({ content: 'No draft running.', flags: EPH });
+    const c = draftCaptain(d);
+    if (i.user.id !== c.id) return i.reply({ content: `Waiting for <@${c.id}> to pick.`, flags: EPH });
+    if (!draftPick(d, i.values[0])) return i.reply({ content: 'That player was already picked.', flags: EPH });
+    if (d.pool.length) return i.update(renderDraft(s));
+    s.res = compose(d.all, d.teams[0], d.teams[1], ''); s.drafted = true; s.draft = null;
+    return i.update(renderTeams(s, !!vcs));
+  }
+
+  // everything below needs you to be in the lobby (or a team channel)
   if (![s.vcId, ...(vcs || [])].includes(i.member?.voice?.channelId))
     return i.reply({ content: 'Join the voice channel to use this.', flags: EPH });
-  s.t = Date.now();
 
-  if (i.customId === 'reroll') {
+  if (id === 'reroll') {
     await i.deferUpdate();
     const vc = i.guild.channels.cache.get(s.vcId);
     const ids = vc ? humans(vc) : s.res.teams.flat().map((p) => p.id);
     if (ids.length < 2) return i.followUp({ content: 'Not enough people in the channel.', flags: EPH });
-    s.res = await makeTeams(ids, s.res.key);
-    return i.editReply(renderTeams(s.res, !!vcs, false));
+    s.res = await makeTeams(ids, s.res.key); s.drafted = false; s.draft = null;
+    return i.editReply(renderTeams(s, !!vcs));
   }
 
-  if (i.customId === 'move' || i.customId === 'back') {
-    const back = i.customId === 'back';
+  if (id === 'draft') {
+    const vc = i.guild.channels.cache.get(s.vcId);
+    const ids = vc ? humans(vc) : [];
+    if (ids.length < 4) return i.reply({ content: 'Need at least 4 players in the channel for a captain draft.', flags: EPH });
+    if (ids.length > 10) return i.reply({ content: 'Max 10 players.', flags: EPH });
+    await i.deferUpdate();
+    const names = Object.fromEntries(ids.map((x) => [x, vc.members.get(x)?.displayName || x]));
+    s.draft = startDraft(await buildPlayers(ids), names);
+    return i.editReply(renderDraft(s));
+  }
+  if (id === 'cancel') {
+    s.draft = null;
+    return i.update(renderTeams(s, !!vcs));
+  }
+
+  if (id === 'move' || id === 'back') {
+    const back = id === 'back';
     if (!vcs) return i.reply({ content: 'Team voice channels not found.', flags: EPH });
     await i.deferReply({ flags: EPH });
     let n = 0, failed = 0;
@@ -458,8 +632,28 @@ async function onTeamButton(i) { // buttons on the public teams message
         try { await m.voice.setChannel(back ? s.vcId : vcs[side]); n++; } catch { failed++; }
       }
     }
-    if (n) { s.moved = !back; await i.message.edit(renderTeams(s.res, true, s.moved)); }
+    if (n) { s.moved = !back; await i.message.edit(renderTeams(s, true)); }
     return i.editReply(`Moved ${n}` + (failed ? `, ${failed} failed (not in voice / missing Move Members).` : '.'));
+  }
+}
+
+// ── dispatch ─────────────────────────────────────────────────────────────
+async function handle(i) {
+  const age = Date.now() - i.createdTimestamp; // ms since the click; Discord allows 3000 for the first reply
+  try {
+    if (i.isChatInputCommand()) await onCommand(i);
+    else if (i.isModalSubmit()) await onModal(i);
+    else if (i.isMessageComponent()) await (i.customId.startsWith('lol:') ? onPanel(i) : onTeamButton(i));
+  } catch (e) {
+    if (e.code === 10062) { // reply window missed, or another running copy of the bot answered first
+      console.warn(`Unknown interaction (age ${age}ms when received, gateway ping ${i.client?.ws?.ping}ms). ` +
+        (age > 2000 ? 'Event arrived late: slow host or clock skew.' : 'Arrived in time: another copy of the bot is probably running.'));
+      return;
+    }
+    console.error(e);
+    const content = `Error: ${riotErr(e)}`;
+    const send = i.deferred || i.replied ? i.followUp({ content, flags: EPH }) : i.reply({ content, flags: EPH });
+    send.catch(() => {});
   }
 }
 
@@ -478,29 +672,15 @@ function start() {
     console.log(`Ready as ${client.user.tag}`);
   });
 
-  client.on(Events.InteractionCreate, async (i) => {
-    const age = Date.now() - i.createdTimestamp; // ms since the click; Discord allows 3000 for the first reply
-    try {
-      if (i.isChatInputCommand()) await onCommand(i);
-      else if (i.isModalSubmit()) await onModal(i);
-      else if (i.isStringSelectMenu()) await onPanel(i);
-      else if (i.isButton()) await (i.customId.startsWith('lol:') ? onPanel(i) : onTeamButton(i));
-    } catch (e) {
-      if (e.code === 10062) { // reply window missed, or another running copy of the bot answered first
-        console.warn(`Unknown interaction (age ${age}ms when received, gateway ping ${client.ws.ping}ms). ` +
-          (age > 2000 ? 'Event arrived late: slow host or clock skew.' : 'Arrived in time: another copy of the bot is probably running.'));
-        return;
-      }
-      console.error(e);
-      const content = `Error: ${riotErr(e)}`;
-      const send = i.deferred || i.replied ? i.followUp({ content, flags: EPH }) : i.reply({ content, flags: EPH });
-      send.catch(() => {});
-    }
-  });
+  client.on(Events.InteractionCreate, handle);
 
-  setInterval(() => { for (const [id, s] of sessions) if (Date.now() - s.t > 2 * 3600e3) sessions.delete(id); }, 600e3);
+  setInterval(() => { for (const [id, s] of sessions) if (Date.now() - s.t > SESSION_TTL) sessions.delete(id); }, 600e3);
   client.login(DISCORD_TOKEN);
 }
 
 if (require.main === module) start();
-module.exports = { parseRiotId, parseRank, ratingLabel, toRating, pickSplit, assignRoles, makeTeams, teamVcs, panel, renderTeams, linkModal, rankModal };
+module.exports = {
+  parseRiotId, parseRank, ratingLabel, toRating, pickSplit, toUnits, assignRoles, makeTeams, buildPlayers, compose,
+  startDraft, draftPick, draftCaptain, pickTeam, applyResult, undoResult, boardEmbed, getRank,
+  teamVcs, panel, renderTeams, renderDraft, linkModal, rankModal, handle, db, sessions,
+};
