@@ -276,7 +276,7 @@ function fakePlayers(count, ownerId, withDuo) {
     const alts = ROLES.filter((r) => r !== main && Math.random() < 0.4);
     const duo = withDuo && i === 0; // your duo setting makes "Test 1" your partner
     return {
-      id: `test:${i + 1}`, name: `Test ${i + 1}${duo ? ' 🤝' : ''}`, // 🤝 = your duo partner rating, label: `${ratingLabel(rating)} (test)`, icon: rankIcon(rating), linked: true,
+      id: `test:${i + 1}`, name: `Test ${i + 1}${duo ? ' 🤝' : ''}`, rating, label: `${ratingLabel(rating)} (test)`, icon: rankIcon(rating), linked: true,
       roles: Math.random() < 0.2 ? [] : [main, ...alts], duo: duo ? ownerId : undefined,
     };
   });
