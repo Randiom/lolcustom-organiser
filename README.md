@@ -30,8 +30,12 @@ Run `/lol test:8` (needs Manage Server) to fill a lobby with you plus 7 fake pla
 | `DEFAULT_REGION` | `euw` | region for plain `Name#TAG` (op.gg links set their own) |
 | `RANK_TTL_HOURS` | `24` | rank cache lifetime |
 | `DB_FILE` | `data.json` | links, ranks, duo partners and results. Keep it on persistent storage. |
+| `ICON_URL` | Community Dragon | crest URL template with `{tier}` (iron, bronze, … master) |
 | `TEAM1_VC` / `TEAM2_VC` | | channel IDs for team voice channels |
 | `DEFAULT_RATING`, `TOLERANCE` | `1000`, `20` | unranked fallback, balancing randomness |
+
+## Rank icons
+On startup the bot uploads the rank crests (Iron … Diamond, Master+) as application emojis and uses them next to every rank. Source per tier: `icons/<tier>.png` in the repo if you add one (e.g. `icons/gold.png`), otherwise the URL in `ICON_URL` (default: Community Dragon's `emblem-{tier}.png`). Emojis are only uploaded once. If a crest can't be loaded, that tier falls back to a coloured emoji. Check the console for `Rank crests loaded: 8/8`.
 
 Teams messages stay interactive for 12 hours (or until the bot restarts).
 

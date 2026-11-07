@@ -786,3 +786,20 @@ test('state is persisted to the database file', () => {
   assert.equal(onDisk.users[U(1)].w, 1);
   assert.deepEqual(onDisk.users[U(1)].roles, ['mid']);
 });
+
+test('rank crests: uploaded as app emojis, used in cards and select menus, fallback on failure', async () => {
+  const made = [];
+  const realFetch = global.fetch;
+  global.fetch = async (u) => (/emblem-silver/.test(u) ? { arrayBuffer: async () => { throw new Error('404'); } } : { arrayBuffer: async () => new ArrayBuffer(4) });
+  const app = { emojis: { fetch: async () => new Map([[1, { name: 'lol_gold', id: '900' }]]), create: async ({ name }) => { made.push(name); return { name, id: String(made.length) }; } } };
+  try { await m.loadCrests(app); } finally { global.fetch = realFetch; }
+  assert.ok(!made.includes('lol_gold'), 'existing emoji reused, not re-uploaded');
+  assert.equal(m.rankIcon(1300), '<:lol_gold:900>');
+  assert.match(m.rankIcon(2900), /^<:lol_master:\d+>$/);
+  assert.equal(m.rankIcon(900), '⚪', 'failed upload falls back to unicode');
+  const d = m.startDraft(fakePs(6, () => 1300).map((p) => ({ ...p, name: p.id, icon: m.rankIcon(1300) })), {});
+  const out = m.renderDraft({ draft: d });
+  assert.match(JSON.stringify(out), /<:lol_gold:900>/);
+  JSON.stringify(out.components.map((c) => c.toJSON())); // builder validation of the menu emoji
+  for (const t of ['iron', 'bronze', 'silver', 'gold', 'platinum', 'emerald', 'diamond', 'master']) delete m.crests[t];
+});

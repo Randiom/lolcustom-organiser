@@ -339,8 +339,33 @@ const rowOf = (...c) => new ActionRowBuilder().addComponents(...c);
 
 // Layout: a slim header (title, balance, warnings) + one colour-coded card per team with a Role | Player | Rank table.
 const ROLE_ICON = { top: '🛡️', jungle: '🌲', mid: '🔮', bot: '🏹', support: '🩹' };
-const TIER_ICON = ['⚫', '🟤', '⚪', '🟡', '🔷', '🟢', '💎']; // iron … diamond
-const rankIcon = (r) => (r >= 2800 ? '🟣' : TIER_ICON[Math.min(6, Math.floor(Math.max(0, r) / 400))]);
+const TIER_ICON = ['⚫', '🟤', '⚪', '🟡', '🔷', '🟢', '💎']; // fallback when crests aren't loaded: iron … diamond
+const CREST_TIERS = ['iron', 'bronze', 'silver', 'gold', 'platinum', 'emerald', 'diamond', 'master'];
+const crests = {}; // tier -> '<:lol_gold:123>' once uploaded as application emojis (see loadCrests)
+const tierOf = (r) => (r >= 2800 ? 7 : Math.min(6, Math.floor(Math.max(0, r) / 400)));
+const rankIcon = (r) => { const t = tierOf(r); return crests[CREST_TIERS[t]] || (t === 7 ? '🟣' : TIER_ICON[t]); };
+const emojiOf = (e) => { const m = /^<(a?):(\w+):(\d+)>$/.exec(e); return m ? { id: m[3], name: m[2], animated: !!m[1] } : e; }; // for select menus
+
+// Real rank crests: uploaded once as application emojis (bot-owned, usable in any server). Source per tier:
+// icons/<tier>.png in the repo if present, else ICON_URL (default: Community Dragon, the game's own client assets).
+async function loadCrests(app) {
+  const base = process.env.ICON_URL || 'https://raw.communitydragon.org/latest/plugins/rcp-fe-lol-static-assets/global/default/ranked-emblem/emblem-{tier}.png';
+  const have = new Map();
+  try { for (const e of (await app.emojis.fetch()).values()) have.set(e.name, e); } catch (e) { console.warn('Crests: cannot list emojis:', e.message); return; }
+  for (const t of CREST_TIERS) {
+    const name = `lol_${t}`;
+    try {
+      let e = have.get(name);
+      if (!e) {
+        const local = `${__dirname}/icons/${t}.png`;
+        const attachment = fs.existsSync(local) ? local : Buffer.from(await (await fetch(base.replace('{tier}', t))).arrayBuffer());
+        e = await app.emojis.create({ attachment, name });
+      }
+      crests[t] = `<:${e.name}:${e.id}>`;
+    } catch (err) { console.warn(`Crest ${t} unavailable, using fallback emoji:`, err.message); }
+  }
+  console.log(`Rank crests loaded: ${Object.keys(crests).length}/${CREST_TIERS.length}`);
+}
 const BLUE = 0x3b82f6, RED = 0xef4444, BLURPLE = 0x5865f2;
 
 function balanceLine(res) {
@@ -391,7 +416,7 @@ function renderDraft(s) {
       { name: 'Rank', value: d.teams[n].map((p) => `${p.icon} ${p.label}`).join('\n'), inline: true });
   const menu = new StringSelectMenuBuilder().setCustomId('pick').setPlaceholder(`${turn ? '🔴' : '🔵'} Pick a player`)
     .addOptions(d.pool.map((p) => new StringSelectMenuOptionBuilder()
-      .setLabel((d.names[p.id] || p.id).slice(0, 100)).setDescription(p.label.replace('*', '')).setValue(p.id).setEmoji(p.icon)));
+      .setLabel((d.names[p.id] || p.id).slice(0, 100)).setDescription(p.label.replace('*', '')).setValue(p.id).setEmoji(emojiOf(p.icon))));
   return { embeds: [head, card(0), card(1)], components: [rowOf(menu), rowOf(btn('cancel', 'Cancel draft', ButtonStyle.Secondary))] };
 }
 
@@ -732,6 +757,7 @@ function start() {
     const g = GUILD_ID ? await client.guilds.fetch(GUILD_ID) : null; // guild commands update instantly
     await (g ? g.commands : client.application.commands).set(body);
     console.log(`Ready as ${client.user.tag}`);
+    loadCrests(client.application);
   });
 
   client.on(Events.InteractionCreate, handle);
@@ -744,5 +770,5 @@ if (require.main === module) start();
 module.exports = {
   parseRiotId, parseRank, ratingLabel, toRating, pickSplit, toUnits, assignRoles, makeTeams, buildPlayers, compose,
   startDraft, draftPick, draftCaptain, pickTeam, applyResult, undoResult, boardEmbed, getRank, balance, fakePlayers, testLobbies,
-  teamVcs, panel, renderTeams, renderDraft, linkModal, rankModal, handle, db, sessions,
+  teamVcs, panel, loadCrests, crests, rankIcon, renderTeams, renderDraft, linkModal, rankModal, handle, db, sessions,
 };
