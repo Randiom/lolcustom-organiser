@@ -803,3 +803,10 @@ test('rank crests: uploaded as app emojis, used in cards and select menus, fallb
   JSON.stringify(out.components.map((c) => c.toJSON())); // builder validation of the menu emoji
   for (const t of Object.keys(m.crests)) delete m.crests[t];
 });
+
+test('teams message carries the banner image', async () => {
+  const { w, s } = await startPractice(8);
+  const out = m.renderTeams(s, false);
+  assert.equal(out.files.length, 1);
+  assert.equal(out.embeds[0].toJSON().image.url, 'attachment://banner.png');
+});

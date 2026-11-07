@@ -12,7 +12,7 @@ try { process.loadEnvFile(); } catch {} // optional .env file (Node 20.12+)
 const fs = require('fs');
 const {
   Client, Events, GatewayIntentBits, MessageFlags, ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder,
+  EmbedBuilder, AttachmentBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder, UserSelectMenuBuilder, PermissionFlagsBits, SlashCommandBuilder,
 } = require('discord.js');
 
@@ -342,6 +342,7 @@ const ROLE_ICON = { top: '🛡️', jungle: '🌲', mid: '🔮', bot: '🏹', su
 const TIER_ICON = ['⚫', '🟤', '⚪', '🟡', '🔷', '🟢', '💎']; // fallback when crests aren't loaded: iron … diamond
 const CREST_TIERS = ['iron', 'bronze', 'silver', 'gold', 'platinum', 'emerald', 'diamond', 'master', 'unranked'];
 const crests = {}; // tier -> '<:lol_gold:123>' once uploaded as application emojis (see loadCrests)
+const BANNER = `${__dirname}/icons/banner.png`;
 const unrankedIcon = () => crests.unranked || '❔';
 const tierOf = (r) => (r >= 2800 ? 7 : Math.min(6, Math.floor(Math.max(0, r) / 400)));
 const rankIcon = (r) => { const t = tierOf(r); return crests[CREST_TIERS[t]] || (t === 7 ? '🟣' : TIER_ICON[t]); };
@@ -396,15 +397,17 @@ function renderTeams(s, canMove) {
   if (res.duoIgnored) lines.push('⚠️ Duo partners couldn\'t be kept together with this player count.');
   const head = new EmbedBuilder().setColor(BLURPLE).setDescription(lines.join('\n'))
     .setTitle((s.test ? '🧪 ' : '') + (rep ? `Teams · ${rep.winner ? '🔴 Red' : '🔵 Blue'} won` : s.drafted ? 'Teams · captain draft' : 'Teams'));
+  const files = [];
+  if (fs.existsSync(BANNER)) { head.setImage('attachment://banner.png'); files.push(new AttachmentBuilder(BANNER, { name: 'banner.png' })); }
   const embeds = [head, teamEmbed(s, 0), teamEmbed(s, 1)];
   const foot = [res.flagged && `* counted as ${ratingLabel(DEFAULT_RATING)}`, s.test && 'practice lobby, not saved'].filter(Boolean);
   if (foot.length) embeds[2].setFooter({ text: foot.join(' · ') });
 
-  if (rep) return { embeds, components: [rowOf(btn('undo', 'Undo result', ButtonStyle.Secondary))] };
+  if (rep) return { embeds, files, components: [rowOf(btn('undo', 'Undo result', ButtonStyle.Secondary))] };
   const top = s.moved ? rowOf(btn('back', 'Move everyone back', ButtonStyle.Primary))
     : rowOf(btn('reroll', 'Reroll', ButtonStyle.Primary), btn('draft', 'Captain draft', ButtonStyle.Secondary),
       ...(canMove ? [btn('move', 'Move to team channels', ButtonStyle.Secondary)] : []));
-  return { embeds, components: [top, rowOf(btn('win0', '🔵 Blue won', ButtonStyle.Secondary), btn('win1', '🔴 Red won', ButtonStyle.Secondary))] };
+  return { embeds, files, components: [top, rowOf(btn('win0', '🔵 Blue won', ButtonStyle.Secondary), btn('win1', '🔴 Red won', ButtonStyle.Secondary))] };
 }
 
 function renderDraft(s) {
