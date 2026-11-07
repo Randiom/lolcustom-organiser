@@ -13,6 +13,9 @@ Discord bot for League of Legends custom games. Members link their Riot account,
 - **Move to team channels** (and back) if the server has voice channels named "Blue" and "Red".
 - Manual rank for unranked players and smurfs. Rank is cached for 24h and refreshed when you open `/lol`.
 
+## Practice lobby (test alone)
+Run `/lol test:8` (needs Manage Server) to fill a lobby with you plus 7 fake players. **Make teams**, Reroll, Captain draft and the result buttons then work with nobody in voice. Fake players have random ranks and roles, and only you can press the buttons. In a practice lobby you pick for both captains. Results are not saved and nothing lands in the leaderboard. If you have a duo partner set, "Test 1" stands in as your duo. Run plain `/lol` to leave.
+
 ## Setup
 1. Discord Developer Portal → New Application → Bot → copy the token. Invite with scopes `bot` + `applications.commands` and permissions View Channel, Send Messages, Embed Links, Connect and Move Members.
 2. Get a Riot API key at developer.riotgames.com (dev keys expire every 24h; register a personal app for a permanent one).

@@ -60,7 +60,7 @@ function mk(kind, o = {}) {
     user: { id: o.user }, memberPermissions: { has: () => !!o.admin }, member: o.member, guild: o.guild, channel: o.channel,
     channelId: 'c1', createdTimestamp: o.createdTimestamp ?? Date.now(), customId: o.customId, values: o.values,
     users: o.users, message: o.message, client: { ws: { ping: 7 } }, deferred: false, replied: false, calls,
-    options: { getUser: () => o.target ?? null },
+    options: { getUser: () => o.target ?? null, getInteger: () => o.test ?? null },
     fields: { getTextInputValue: (k) => o.fields[k] },
     isChatInputCommand: () => kind === 'cmd', isModalSubmit: () => kind === 'modal', isMessageComponent: () => kind === 'comp',
     reply: rec('reply'), editReply: rec('editReply'), update: rec('update'), deferUpdate: rec('deferUpdate'),
@@ -603,6 +603,124 @@ test('captain draft flow: only the captain can pick, finishes into normal teams,
   const win = press(w, 'win0', U(1)); // a drafted result can be reported like any other
   await m.handle(win);
   assert.match(body(last(win, 'update')), /Blue won/);
+});
+
+// ── practice lobby (fake players, no voice channel) ──────────────────────
+// the tester is NOT in any voice channel here
+async function startPractice(n, { admin = true, duo } = {}) {
+  reset();
+  m.testLobbies.clear();
+  const w = world([U(1)]);
+  w.members.get(U(1)).voice = {}; // not in voice
+  if (duo) db.users[U(1)] = { override: 1200, duo };
+  const open = mk('cmd', { user: U(1), admin, test: n });
+  await m.handle(open);
+  const make = mk('comp', { customId: `lol:teams:${U(1)}`, user: U(1), guild: w.guild, channel: w.channel, member: w.members.get(U(1)) });
+  await m.handle(make);
+  return { w, open, make, s: m.sessions.get('msg1') };
+}
+const tpress = (w, customId, user = U(1), extra = {}) =>
+  mk('comp', { customId, user, guild: w.guild, member: { voice: {} }, message: w.message(), ...extra });
+
+test('/lol test:N needs Manage Server; the panel announces the practice lobby; plain /lol leaves it', async () => {
+  reset(); m.testLobbies.clear();
+  const denied = mk('cmd', { user: U(1), test: 6 });
+  await m.handle(denied);
+  assert.match(last(denied, 'reply').content, /Manage Server/);
+  assert.equal(m.testLobbies.size, 0);
+
+  const ok = mk('cmd', { user: U(1), admin: true, test: 6 });
+  await m.handle(ok);
+  assert.equal(m.testLobbies.get(U(1)), 6);
+  assert.match(body(last(ok, 'editReply')), /Practice lobby: you \+ 5 fake players/);
+
+  const leave = mk('cmd', { user: U(1), admin: true });
+  await m.handle(leave);
+  assert.equal(m.testLobbies.has(U(1)), false);
+  assert.doesNotMatch(body(last(leave, 'editReply')), /Practice lobby/);
+});
+
+test('practice Make teams works alone: fake players by name, no move button, 🧪 marked', async () => {
+  const { w, s, make } = await startPractice(8);
+  assert.ok(s?.test);
+  assert.equal(s.res.teams.flat().length, 8);
+  assert.equal(w.posted.length, 1);
+  const text = body(w.posted[0]);
+  assert.match(text, /🧪 Teams/);
+  assert.match(text, /\*\*Test 1\*\*/);
+  assert.match(text, new RegExp(`<@${U(1)}>`));
+  assert.doesNotMatch(text, /<@test:/);
+  assert.match(text, /practice lobby, not saved/);
+  const labels = w.posted[0].components.flatMap((r) => r.toJSON().components.map((c) => c.label));
+  assert.deepEqual(labels, ['Reroll', 'Captain draft', '🔵 Blue won', '🔴 Red won']);
+  assert.match(body(last(make, 'editReply')), /Test teams posted/);
+});
+
+test('without a practice lobby, Make teams still needs a voice channel', async () => {
+  reset(); m.testLobbies.clear();
+  const w = world([U(1)]);
+  const i = mk('comp', { customId: `lol:teams:${U(1)}`, user: U(1), guild: w.guild, channel: w.channel, member: { voice: {} } });
+  await m.handle(i);
+  assert.match(body(last(i, 'update')), /Join a voice channel/);
+});
+
+test('practice lobby buttons are owner-only; reroll works without voice', async () => {
+  const { w, s } = await startPractice(7);
+  const stranger = tpress(w, 'reroll', U(2));
+  await m.handle(stranger);
+  assert.match(last(stranger, 'reply').content, /someone else's practice lobby/);
+  const before = s.res.key;
+  const i = tpress(w, 'reroll');
+  await m.handle(i);
+  assert.ok(last(i, 'editReply'));
+  assert.notEqual(s.res.key, before);
+  assert.equal(s.res.teams.flat().length, 7);
+});
+
+test('practice draft: you pick for both captains, finishes into teams', async () => {
+  const { w, s } = await startPractice(8);
+  await m.handle(tpress(w, 'draft'));
+  assert.ok(s.draft);
+  assert.match(body(m.renderDraft(s)), /🧪 Captain draft/);
+  while (s.draft) await m.handle(tpress(w, 'pick', U(1), { values: [s.draft.pool[0].id] })); // always the same user
+  assert.equal(s.drafted, true);
+  assert.deepEqual(s.res.teams.map((t) => t.length), [4, 4]);
+  assert.equal(new Set(s.res.teams.flat().map((p) => p.id)).size, 8);
+});
+
+test('practice draft needs 4 players', async () => {
+  const { w, s } = await startPractice(3);
+  const i = tpress(w, 'draft');
+  await m.handle(i);
+  assert.match(last(i, 'reply').content, /at least 4/);
+  assert.equal(s.draft, undefined);
+});
+
+test('practice results are computed but never saved; undo works; no fake players leak into the db', async () => {
+  const { w, s } = await startPractice(6);
+  const win = tpress(w, 'win0');
+  await m.handle(win);
+  assert.match(body(last(win, 'update')), /🧪 Teams · 🔵 Blue won/);
+  assert.match(body(last(win, 'update')), /not saved/);
+  assert.equal(s.report.dry, true);
+  assert.deepEqual(db.users, {});
+  const undo = tpress(w, 'undo');
+  await m.handle(undo);
+  assert.equal(s.report, null);
+  assert.deepEqual(db.users, {});
+  assert.ok(!Object.keys(db.users).some((k) => k.startsWith('test:')));
+  const board = mk('comp', { customId: `lol:board:${U(1)}`, user: U(1) });
+  await m.handle(board);
+  assert.match(body(last(board, 'reply')), /No results yet/);
+});
+
+test('practice lobby: your duo setting makes Test 1 your partner, always on your team', async () => {
+  for (let r = 0; r < 15; r++) {
+    const { s } = await startPractice(8, { duo: U(2) }); // U(2) isn't in the lobby; Test 1 stands in
+    const side = (id) => s.res.teams.findIndex((t) => t.some((p) => p.id === id));
+    assert.equal(side('test:1'), side(U(1)));
+    assert.match(s.names['test:1'], /your duo/);
+  }
 });
 
 // ── plumbing ─────────────────────────────────────────────────────────────

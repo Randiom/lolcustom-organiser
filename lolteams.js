@@ -257,13 +257,29 @@ function compose(ps, A, B, key) {
     unlinked: ps.filter((p) => !p.linked).map((p) => p.id),
   };
 }
-async function makeTeams(ids, avoid) {
-  const ps = await buildPlayers(ids);
+function balance(ps, avoid) {
   let { A, B, key, duoIgnored } = pickSplit(ps, avoid);
   if (Math.random() < 0.5) [A, B] = [B, A]; // random side
   const res = compose(ps, A, B, key);
   res.duoIgnored = duoIgnored;
   return res;
+}
+const makeTeams = async (ids, avoid) => balance(await buildPlayers(ids), avoid);
+
+// ── practice lobby: fake players so everything can be tested alone ───────
+const testLobbies = new Map(); // user id -> lobby size (in memory; /lol without `test` leaves it)
+const who = (p) => (p.name ? `**${p.name}**` : `<@${p.id}>`);
+function fakePlayers(count, ownerId, withDuo) {
+  return Array.from({ length: count }, (_, i) => {
+    const rating = Math.round(300 + Math.random() * 2000); // roughly Iron to Diamond
+    const main = ROLES[(Math.random() * ROLES.length) | 0];
+    const alts = ROLES.filter((r) => r !== main && Math.random() < 0.4);
+    const duo = withDuo && i === 0; // your duo setting makes "Test 1" your partner
+    return {
+      id: `test:${i + 1}`, name: `Test ${i + 1}${duo ? ' (your duo)' : ''}`, rating, label: `${ratingLabel(rating)} (test)`, linked: true,
+      roles: Math.random() < 0.2 ? [] : [main, ...alts], duo: duo ? ownerId : undefined,
+    };
+  });
 }
 
 // ── captain draft: two highest-rated players captain, the lower-rated one picks first, snake order ──
@@ -282,11 +298,12 @@ function draftPick(d, id) {
 }
 
 // ── results: Elo-style in-house adjustment on top of rank ────────────────
-function applyResult(res, winner) {
+function applyResult(res, winner, dry = false) { // dry = practice lobby: compute the report, store nothing
   const E = 1 / (1 + 10 ** ((res.avg[1 - winner] - res.avg[winner]) / 400)); // winner's expected score
   const d = Math.max(1, Math.round(ELO_K * (1 - E)));
-  const report = { winner, d, deltas: {}, won: res.teams[winner].map((p) => p.id), lost: res.teams[1 - winner].map((p) => p.id) };
+  const report = { winner, d, dry, deltas: {}, won: res.teams[winner].map((p) => p.id), lost: res.teams[1 - winner].map((p) => p.id) };
   const bump = (id, won) => {
+    if (dry) { report.deltas[id] = won ? d : -d; return; }
     const u = (db.users[id] ||= {}), before = u.adj || 0;
     u.adj = Math.max(-ADJ_MAX, Math.min(ADJ_MAX, before + (won ? d : -d)));
     u[won ? 'w' : 'l'] = (u[won ? 'w' : 'l'] || 0) + 1;
@@ -294,10 +311,11 @@ function applyResult(res, winner) {
   };
   report.won.forEach((id) => bump(id, true));
   report.lost.forEach((id) => bump(id, false));
-  save();
+  if (!dry) save();
   return report;
 }
 function undoResult(report) {
+  if (report.dry) return;
   for (const id of [...report.won, ...report.lost]) {
     const u = db.users[id];
     if (!u) continue;
@@ -322,22 +340,23 @@ const rowOf = (...c) => new ActionRowBuilder().addComponents(...c);
 function renderTeams(s, canMove) {
   const { res, report: rep } = s;
   const e = new EmbedBuilder().setColor(0x5865f2)
-    .setTitle(rep ? `Teams · ${rep.winner ? '🔴 Red' : '🔵 Blue'} won` : s.drafted ? 'Teams · captain draft' : 'Teams');
+    .setTitle((s.test ? '🧪 ' : '') + (rep ? `Teams · ${rep.winner ? '🔴 Red' : '🔵 Blue'} won` : s.drafted ? 'Teams · captain draft' : 'Teams'));
   const notes = [];
   if (res.unlinked.length) {
-    const who = res.unlinked.map((id) => `<@${id}>`).join(' ');
-    notes.push(`⚠ ${who} ${res.unlinked.length > 1 ? "haven't" : "hasn't"} linked an account. Use /lol to link.`);
+    const mentions = res.unlinked.map((id) => `<@${id}>`).join(' ');
+    notes.push(`⚠ ${mentions} ${res.unlinked.length > 1 ? "haven't" : "hasn't"} linked an account. Use /lol to link.`);
   }
   if (res.duoIgnored) notes.push('⚠ Duo partners couldn\'t be kept together with this player count.');
   if (notes.length) e.setDescription(notes.join('\n'));
   ['🔵 Blue', '🔴 Red'].forEach((name, n) =>
     e.addFields({
       name: `${name} · avg ${ratingLabel(res.avg[n])}`,
-      value: res.teams[n].map((p) => `**${cap(p.role)}** <@${p.id}> · ${p.label}`).join('\n'),
+      value: res.teams[n].map((p) => `**${cap(p.role)}** ${who(p)} · ${p.label}`).join('\n'),
     }));
   e.setFooter({
-    text: rep ? `In-house rating: winners ${signed(rep.d)}, losers ${signed(-rep.d)}`
-      : `Δ ${res.diff.toFixed(0)} avg pts` + (res.flagged ? ` · * counted as ${ratingLabel(DEFAULT_RATING)}` : ''),
+    text: (rep ? `In-house rating: winners ${signed(rep.d)}, losers ${signed(-rep.d)}`
+      : `Δ ${res.diff.toFixed(0)} avg pts` + (res.flagged ? ` · * counted as ${ratingLabel(DEFAULT_RATING)}` : ''))
+      + (s.test ? ' · practice lobby, not saved' : ''),
   });
   if (rep) return { embeds: [e], components: [rowOf(btn('undo', 'Undo result', ButtonStyle.Secondary))] };
   const top = s.moved ? rowOf(btn('back', 'Move everyone back', ButtonStyle.Primary))
@@ -348,11 +367,11 @@ function renderTeams(s, canMove) {
 
 function renderDraft(s) {
   const d = s.draft, c = draftCaptain(d);
-  const e = new EmbedBuilder().setColor(0x5865f2).setTitle('Captain draft')
-    .setDescription(`<@${c.id}> picks next.`)
+  const e = new EmbedBuilder().setColor(0x5865f2).setTitle(`${s.test ? '🧪 ' : ''}Captain draft`)
+    .setDescription(`${who(c)} picks next.`)
     .addFields(['🔵 Blue', '🔴 Red'].map((name, n) => ({
       name,
-      value: d.teams[n].map((p, i) => `${i ? '' : '👑 '}<@${p.id}> · ${p.label}`).join('\n'),
+      value: d.teams[n].map((p, i) => `${i ? '' : '👑 '}${who(p)} · ${p.label}`).join('\n'),
     })));
   const menu = new StringSelectMenuBuilder().setCustomId('pick').setPlaceholder('Pick a player')
     .addOptions(d.pool.map((p) => new StringSelectMenuOptionBuilder()
@@ -388,12 +407,15 @@ function panel(tid, notice) {
     : rk ? `${rk.label}\n<t:${Math.floor(rk.at / 1000)}:R>` : '—') + record;
   const roleLine = !roles ? 'Not set (fill)' : !roles.length ? 'Fill'
     : cap(main) + (roles.length > 1 ? `\nalso ${roles.slice(1).map(cap).join(', ')}` : '');
-  const hint = !linked && u.override == null ? 'Start with Link account.'
+  const testN = testLobbies.get(tid);
+  const hint = testN ? 'Press Make teams. No voice channel needed.'
+    : !linked && u.override == null ? 'Start with Link account.'
     : !roles ? 'Pick your main role so teams can place you.'
     : 'Join a voice channel, then press Make teams.';
+  const testLine = testN && `🧪 Practice lobby: you + ${testN - 1} fake players. Results aren't saved. Run /lol again to leave.`;
 
   const e = new EmbedBuilder().setTitle('LoL profile').setColor(0x5865f2)
-    .setDescription([`<@${tid}>`, notice].filter(Boolean).join('\n\n'))
+    .setDescription([`<@${tid}>`, testLine, notice].filter(Boolean).join('\n\n'))
     .addFields(
       { name: 'Account', value: accountLine, inline: true },
       { name: 'Rank', value: rankLine, inline: true },
@@ -446,7 +468,9 @@ function rankModal(tid) {
 // ── handlers ─────────────────────────────────────────────────────────────
 const commands = [
   new SlashCommandBuilder().setName('lol').setDescription('Your LoL profile and team maker')
-    .addUserOption((o) => o.setName('user').setDescription('Edit someone else (needs Manage Server)')),
+    .addUserOption((o) => o.setName('user').setDescription('Edit someone else (needs Manage Server)'))
+    .addIntegerOption((o) => o.setName('test').setDescription('Practice lobby with fake players, no voice channel needed (needs Manage Server)')
+      .setMinValue(2).setMaxValue(10)),
 ];
 const isAdmin = (i) => !!i.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
 const canEdit = (i, tid) => i.user.id === tid || isAdmin(i);
@@ -458,6 +482,9 @@ const sessions = new Map(); // public teams message id -> { vcId, res, moved, dr
 async function onCommand(i) {
   const tid = i.options.getUser('user')?.id ?? i.user.id;
   if (!canEdit(i, tid)) return i.reply(NOPE);
+  const n = i.options.getInteger('test');
+  if (n && !isAdmin(i)) return i.reply({ content: 'Practice lobbies need Manage Server.', flags: EPH });
+  if (n) testLobbies.set(i.user.id, n); else testLobbies.delete(i.user.id); // plain /lol leaves the practice lobby
   await i.deferReply({ flags: EPH });
   const u = db.users[tid]; // keep your own rank current when you open the panel
   if (u?.puuid && Date.now() - (db.ranks[u.puuid]?.at || 0) > FRESH) await getRank(u, true);
@@ -498,23 +525,36 @@ async function onPanel(i) { // buttons + selects on the ephemeral panel
   }
 
   if (act === 'teams') {
+    const testN = tid === i.user.id ? testLobbies.get(tid) : undefined;
+    if (testN) return startTest(i, tid, testN);
     const vc = i.member?.voice?.channel;
     if (!vc) return i.update(panel(tid, '⚠ Join a voice channel first.'));
     const ids = humans(vc);
     if (ids.length < 2) return i.update(panel(tid, '⚠ Need at least 2 people in the channel.'));
     if (ids.length > 10) return i.update(panel(tid, '⚠ Max 10 players.'));
     await i.deferUpdate();
-    const s = { vcId: vc.id, res: await makeTeams(ids), moved: false, t: Date.now() };
-    try {
-      const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
-      const msg = await ch.send(renderTeams(s, !!teamVcs(i.guild)));
-      sessions.set(msg.id, s);
-      return i.editReply(panel(tid, `✅ [Teams posted](${msg.url}).`));
-    } catch (e) {
-      console.error(e);
-      return i.editReply(panel(tid, '⚠ Couldn\'t post in this channel. The bot needs Send Messages and Embed Links here.'));
-    }
+    return postTeams(i, tid, { vcId: vc.id, res: await makeTeams(ids), moved: false, t: Date.now() }, 'Teams');
   }
+}
+
+async function postTeams(i, tid, s, label) {
+  try {
+    const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
+    const msg = await ch.send(renderTeams(s, !s.test && !!teamVcs(i.guild)));
+    sessions.set(msg.id, s);
+    return i.editReply(panel(tid, `✅ [${label} posted](${msg.url}).`));
+  } catch (e) {
+    console.error(e);
+    return i.editReply(panel(tid, '⚠ Couldn\'t post in this channel. The bot needs Send Messages and Embed Links here.'));
+  }
+}
+
+async function startTest(i, tid, n) { // you + fake players; no voice channel, nothing saved, only you can press its buttons
+  await i.deferUpdate();
+  const [me] = await buildPlayers([tid]);
+  const ps = [me, ...fakePlayers(n - 1, tid, !!me.duo)];
+  const names = Object.fromEntries(ps.map((p) => [p.id, p.name || i.member?.displayName || i.user.username]));
+  return postTeams(i, tid, { test: true, owner: tid, ps, names, res: balance(ps), moved: false, t: Date.now() }, 'Test teams');
 }
 
 async function onModal(i) {
@@ -564,7 +604,8 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
   const s = sessions.get(i.message.id);
   if (!s) return i.reply({ content: 'Expired. Run /lol and press Make teams again.', flags: EPH });
   s.t = Date.now();
-  const id = i.customId, vcs = teamVcs(i.guild);
+  if (s.test && i.user.id !== s.owner) return i.reply({ content: 'This is someone else\'s practice lobby.', flags: EPH });
+  const id = i.customId, vcs = teamVcs(i.guild), canMove = !s.test && !!vcs;
   const mayReport = s.res.teams.flat().some((p) => p.id === i.user.id) || isAdmin(i);
   const noReport = { content: 'Only players in this match (or Manage Server) can do that.', flags: EPH };
 
@@ -572,52 +613,56 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
     if (!mayReport) return i.reply(noReport);
     if (s.report) return i.reply({ content: 'Result already reported.', flags: EPH });
     if (s.draft) return i.reply({ content: 'Finish or cancel the draft first.', flags: EPH });
-    s.report = applyResult(s.res, id === 'win1' ? 1 : 0);
-    return i.update(renderTeams(s, !!vcs));
+    s.report = applyResult(s.res, id === 'win1' ? 1 : 0, !!s.test);
+    return i.update(renderTeams(s, canMove));
   }
   if (id === 'undo') {
     if (!mayReport) return i.reply(noReport);
     if (!s.report) return i.reply({ content: 'Nothing to undo.', flags: EPH });
     undoResult(s.report); s.report = null;
-    return i.update(renderTeams(s, !!vcs));
+    return i.update(renderTeams(s, canMove));
   }
   if (id === 'pick') {
     const d = s.draft;
     if (!d) return i.reply({ content: 'No draft running.', flags: EPH });
     const c = draftCaptain(d);
-    if (i.user.id !== c.id) return i.reply({ content: `Waiting for <@${c.id}> to pick.`, flags: EPH });
+    if (!s.test && i.user.id !== c.id) return i.reply({ content: `Waiting for ${who(c)} to pick.`, flags: EPH }); // practice: you pick for everyone
     if (!draftPick(d, i.values[0])) return i.reply({ content: 'That player was already picked.', flags: EPH });
     if (d.pool.length) return i.update(renderDraft(s));
     s.res = compose(d.all, d.teams[0], d.teams[1], ''); s.drafted = true; s.draft = null;
-    return i.update(renderTeams(s, !!vcs));
+    return i.update(renderTeams(s, canMove));
   }
 
   // everything below needs you to be in the lobby (or a team channel)
-  if (![s.vcId, ...(vcs || [])].includes(i.member?.voice?.channelId))
+  if (!s.test && ![s.vcId, ...(vcs || [])].includes(i.member?.voice?.channelId))
     return i.reply({ content: 'Join the voice channel to use this.', flags: EPH });
 
   if (id === 'reroll') {
     await i.deferUpdate();
-    const vc = i.guild.channels.cache.get(s.vcId);
-    const ids = vc ? humans(vc) : s.res.teams.flat().map((p) => p.id);
-    if (ids.length < 2) return i.followUp({ content: 'Not enough people in the channel.', flags: EPH });
-    s.res = await makeTeams(ids, s.res.key); s.drafted = false; s.draft = null;
-    return i.editReply(renderTeams(s, !!vcs));
+    if (s.test) s.res = balance(s.ps, s.res.key);
+    else {
+      const vc = i.guild.channels.cache.get(s.vcId);
+      const ids = vc ? humans(vc) : s.res.teams.flat().map((p) => p.id);
+      if (ids.length < 2) return i.followUp({ content: 'Not enough people in the channel.', flags: EPH });
+      s.res = await makeTeams(ids, s.res.key);
+    }
+    s.drafted = false; s.draft = null;
+    return i.editReply(renderTeams(s, canMove));
   }
 
   if (id === 'draft') {
-    const vc = i.guild.channels.cache.get(s.vcId);
-    const ids = vc ? humans(vc) : [];
+    const vc = s.test ? null : i.guild.channels.cache.get(s.vcId);
+    const ids = s.test ? s.ps.map((p) => p.id) : vc ? humans(vc) : [];
     if (ids.length < 4) return i.reply({ content: 'Need at least 4 players in the channel for a captain draft.', flags: EPH });
     if (ids.length > 10) return i.reply({ content: 'Max 10 players.', flags: EPH });
     await i.deferUpdate();
-    const names = Object.fromEntries(ids.map((x) => [x, vc.members.get(x)?.displayName || x]));
-    s.draft = startDraft(await buildPlayers(ids), names);
+    if (s.test) s.draft = startDraft(s.ps, s.names);
+    else s.draft = startDraft(await buildPlayers(ids), Object.fromEntries(ids.map((x) => [x, vc.members.get(x)?.displayName || x])));
     return i.editReply(renderDraft(s));
   }
   if (id === 'cancel') {
     s.draft = null;
-    return i.update(renderTeams(s, !!vcs));
+    return i.update(renderTeams(s, canMove));
   }
 
   if (id === 'move' || id === 'back') {
@@ -681,6 +726,6 @@ function start() {
 if (require.main === module) start();
 module.exports = {
   parseRiotId, parseRank, ratingLabel, toRating, pickSplit, toUnits, assignRoles, makeTeams, buildPlayers, compose,
-  startDraft, draftPick, draftCaptain, pickTeam, applyResult, undoResult, boardEmbed, getRank,
+  startDraft, draftPick, draftCaptain, pickTeam, applyResult, undoResult, boardEmbed, getRank, balance, fakePlayers, testLobbies,
   teamVcs, panel, renderTeams, renderDraft, linkModal, rankModal, handle, db, sessions,
 };
