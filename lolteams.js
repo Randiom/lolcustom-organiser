@@ -839,7 +839,7 @@ async function renderQueue(q, closedNote) {
   return { embeds: [e], files, components: [rowOf(
     btn('q:join', 'Join queue', ButtonStyle.Success), btn('q:leave', 'Leave', ButtonStyle.Danger),
     btn('q:start', n >= 2 ? `Start now (${n})` : 'Start now', ButtonStyle.Primary).setDisabled(n < 2),
-    btn('q:me', 'My profile', ButtonStyle.Secondary), btn('q:close', 'Close', ButtonStyle.Secondary))] };
+    btn('q:me', 'My profile', ButtonStyle.Secondary), btn('q:host', 'Host', ButtonStyle.Secondary))] };
 }
 
 async function openQueue(i) {
@@ -894,6 +894,11 @@ async function onQueue(i) {
   if (q.popping && id !== 'q:me') return no('Making teams… try again in a second.');
 
   if (id === 'q:me') return i.reply({ ...panel(uid), flags: EPH });
+  if (id === 'q:host') {
+    if (uid !== q.host && !isAdmin(i)) return no(`Only the host (<@${q.host}>) or Manage Server can do that.`);
+    await i.deferReply({ flags: EPH });
+    return i.editReply(await hostMenu(i, i.message.id, q));
+  }
   if (id === 'q:join') {
     if (inQ) return no('You are already in the queue.');
     if (q.ids.length >= QMAX) return no(`The queue is full (${QMAX}).`);
@@ -923,6 +928,37 @@ async function onQueue(i) {
   return editQueue(i, q);
 }
 
+// host tools (private): remove a player who wandered off, close the queue
+async function hostMenu(i, qid, q, notice) {
+  const names = {};
+  for (const id of q.ids) names[id] = (await i.guild?.members.fetch(id).catch(() => null))?.displayName || `Player ${q.ids.indexOf(id) + 1}`;
+  const rows = [];
+  if (q.ids.length) rows.push(rowOf(new StringSelectMenuBuilder().setCustomId(`qh:kick:${qid}`).setPlaceholder('Remove a player…')
+    .addOptions(q.ids.map((id) => new StringSelectMenuOptionBuilder().setLabel(names[id].slice(0, 100)).setValue(id)))));
+  rows.push(rowOf(btn(`qh:close:${qid}`, 'Close queue', ButtonStyle.Danger)));
+  return { content: [`**Host tools** · ${q.ids.length}/${QMAX} in queue`, notice].filter(Boolean).join('\n'), components: rows };
+}
+async function onHost(i) {
+  const [, act, qid] = i.customId.split(':');
+  const q = queues.get(qid);
+  if (!q) return i.update({ content: 'This queue is closed or expired.', components: [] });
+  if (i.user.id !== q.host && !isAdmin(i)) return i.reply({ content: 'Only the host or Manage Server can do that.', flags: EPH });
+  await i.deferUpdate();
+  const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId).catch(() => null));
+  const publicMsg = await ch?.messages?.fetch(qid).catch(() => null);
+  if (act === 'kick') {
+    const gone = i.values[0];
+    q.ids = q.ids.filter((x) => x !== gone); q.t = Date.now();
+    await publicMsg?.edit(await renderQueue(q)).catch((e) => console.error('queue edit failed:', e.message));
+    return i.editReply(await hostMenu(i, qid, q, `Removed <@${gone}>.`));
+  }
+  if (act === 'close') {
+    queues.delete(qid);
+    await publicMsg?.edit(await renderQueue(q, `Closed by <@${i.user.id}> after ${q.games || 0} game${q.games === 1 ? '' : 's'}.`)).catch((e) => console.error('queue edit failed:', e.message));
+    return i.editReply({ content: 'Queue closed.', components: [] });
+  }
+}
+
 // ── live state: queues + teams messages survive restarts (kept in the db file) ──
 let liveSnap = '';
 function persistLive() {
@@ -945,7 +981,10 @@ async function handle(i) {
   try {
     if (i.isChatInputCommand()) await onCommand(i);
     else if (i.isModalSubmit()) await onModal(i);
-    else if (i.isMessageComponent()) await (i.customId.startsWith('lol:') ? onPanel(i) : i.customId.startsWith('q:') ? onQueue(i) : onTeamButton(i));
+    else if (i.isMessageComponent()) {
+      const c = i.customId;
+      await (c.startsWith('lol:') ? onPanel(i) : c.startsWith('q:') ? onQueue(i) : c.startsWith('qh:') ? onHost(i) : onTeamButton(i));
+    }
   } catch (e) {
     if (e.code === 10062) { // reply window missed, or another running copy of the bot answered first
       console.warn(`Unknown interaction (age ${age}ms when received, gateway ping ${i.client?.ws?.ping}ms). ` +

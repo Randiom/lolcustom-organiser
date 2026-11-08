@@ -828,12 +828,12 @@ async function openQ(host = U(1)) {
   return { w, q, qpress, open, list };
 }
 
-test('queue: /queue posts an empty queue with Join/Leave/Start/Profile/Close', async () => {
+test('queue: /queue posts an empty queue with Join/Leave/Start/Profile/Host', async () => {
   const { q, open } = await openQ();
   assert.equal(q.host, U(1));
   const out = last(open, 'editReply');
   assert.match(body(out), /Nobody yet/);
-  assert.deepEqual(out.components[0].toJSON().components.map((c) => c.label), ['Join queue', 'Leave', 'Start now', 'My profile', 'Close']);
+  assert.deepEqual(out.components[0].toJSON().components.map((c) => c.label), ['Join queue', 'Leave', 'Start now', 'My profile', 'Host']);
   assert.equal(out.components[0].toJSON().components[2].disabled, true);
 });
 
@@ -1048,4 +1048,33 @@ test('draft with 10 real players and long emoji codes stays within embed limits'
     for (const f of e.fields) assert.ok(f.value.length <= 1024, `${f.name}: ${f.value.length}`);
     out.components.forEach((r) => r.toJSON());
   } finally { for (const t of Object.keys(m.crests)) delete m.crests[t]; }
+});
+
+test('queue host tools: host-only, remove a player (public message updates), close', async () => {
+  const { w, q, qpress, list } = await openQ();
+  q.ids = list.slice(0, 3);
+  const edits = [];
+  const ch = { ...w.channel, messages: { fetch: async (id) => ({ id, edit: async (p) => { edits.push(p); } }) } };
+  const notHost = qpress('q:host', list[1]); await m.handle(notHost);
+  assert.match(last(notHost, 'reply').content, /Only the host/);
+  const open = qpress('q:host', U(1), { channel: ch }); await m.handle(open);
+  const menu = last(open, 'editReply');
+  assert.match(menu.content, /Host tools\*\* · 3\/10/);
+  const opts = menu.components[0].toJSON().components[0].options;
+  assert.deepEqual(opts.map((o) => o.value), list.slice(0, 3));
+  assert.equal(opts[0].label, 'Player 1'); // nobody in this fake guild, so the fallback label
+  const kick = mk('comp', { customId: 'qh:kick:qmsg', user: U(1), values: [list[1]], guild: w.guild, channel: ch });
+  await m.handle(kick);
+  assert.deepEqual(q.ids, [list[0], list[2]]);
+  assert.equal(edits.length, 1);
+  assert.doesNotMatch(body(edits[0]), new RegExp(`<@${list[1]}>`));
+  assert.match(last(kick, 'editReply').content, /Removed/);
+  const sneaky = mk('comp', { customId: 'qh:kick:qmsg', user: list[2], values: [list[0]], guild: w.guild, channel: ch });
+  await m.handle(sneaky);
+  assert.equal(q.ids.length, 2, 'non-host cannot remove');
+  const close = mk('comp', { customId: 'qh:close:qmsg', user: U(1), guild: w.guild, channel: ch });
+  await m.handle(close);
+  assert.equal(m.queues.size, 0);
+  assert.match(body(edits[1]), /Closed by/);
+  assert.equal(edits[1].components.length, 0);
 });

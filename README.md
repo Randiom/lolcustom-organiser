@@ -16,7 +16,8 @@ Discord bot for League of Legends custom games. Members link their Riot account,
 - At 10 players it pops by itself: teams are posted with a ping to everyone, and the queue empties for the next game.
 - Anyone in the queue can press **Start now** to play with fewer.
 - **My profile** opens your private panel (link account, set roles) straight from the queue.
-- The host or Manage Server can **Close** it. One queue per channel. If the message gets deleted, `/queue` makes a new one.
+- **Host** (the person who opened it, or Manage Server) opens private host tools: remove a player who wandered off, or close the queue.
+- One queue per channel. If the message gets deleted, `/queue` makes a new one.
 
 ## Teams
 - **Balanced by rank** (solo queue, flex fallback, manual rank for smurfs) plus the in-house rating. Among near-equal splits, the bot prefers the one where everyone gets a role they're happy with, then picks randomly so **Reroll** gives variety.
