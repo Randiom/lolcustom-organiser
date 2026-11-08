@@ -404,7 +404,7 @@ function renderTeams(s, canMove) {
   const files = [];
   if (fs.existsSync(BANNER)) { head.setImage('attachment://banner.png'); files.push(new AttachmentBuilder(BANNER, { name: 'banner.png' })); }
   const embeds = [head];
-  const foot = [res.flagged && `* counted as ${ratingLabel(DEFAULT_RATING)}`, s.test && 'practice lobby, not saved'].filter(Boolean);
+  const foot = [res.flagged && `* counted as ${ratingLabel(DEFAULT_RATING)}`].filter(Boolean);
   if (foot.length) head.setFooter({ text: foot.join(' · ') });
 
   if (rep) return { embeds, files, components: [rowOf(btn('undo', 'Undo result', ButtonStyle.Secondary))] };

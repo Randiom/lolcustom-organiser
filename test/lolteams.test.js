@@ -682,7 +682,7 @@ test('practice Make teams works alone: fake players by name, no move button, �
   assert.match(text, /\*\*Test 1\*\*/);
   assert.match(text, new RegExp(`<@${U(1)}>`));
   assert.doesNotMatch(text, /<@test:/);
-  assert.match(text, /practice lobby, not saved/);
+  assert.doesNotMatch(text, /practice lobby, not saved/);
   const labels = w.posted[0].components.flatMap((r) => r.toJSON().components.map((c) => c.label));
   assert.deepEqual(labels, ['Reroll', 'Captain draft', '🔵 Blue won', '🔴 Red won']);
   assert.match(body(last(make, 'editReply')), /Test teams posted/);
@@ -733,7 +733,7 @@ test('practice results are computed but never saved; undo works; no fake players
   const win = tpress(w, 'win0');
   await m.handle(win);
   assert.match(body(last(win, 'update')), /🧪 Teams · 🔵 Blue won/);
-  assert.match(body(last(win, 'update')), /not saved/);
+  assert.match(body(last(win, 'update')), /🧪 Teams/);
   assert.equal(s.report.dry, true);
   assert.deepEqual(db.users, {});
   const undo = tpress(w, 'undo');
