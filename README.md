@@ -54,7 +54,7 @@ Discord bot for League of Legends custom games. Members link their Riot account,
 | `DEFAULT_RATING`, `TOLERANCE` | `1000`, `20` | unranked fallback, balancing randomness |
 
 ## Images
-`icons/` holds the rank crests and role icons (from the game), `banner.png` (queue and teams messages) and `leaderboard.png`. Replace the banners with any ~1200×300 image of the same name. On startup the bot uploads the crests and role icons once as application emojis. The console should say `Rank crests loaded: 14/14`; any that fail fall back to plain emoji.
+`icons/` holds the rank crests and role icons (from the game) and the banners: `match.png` (teams), `results.png` (after a result), `draft.png` (captain draft), `leaderboard.png` and `banner.png` (queue, and the fallback for any missing one). Replace any of them with a ~1200×300 image of the same name. On startup the bot uploads the crests and role icons once as application emojis. The console should say `Rank crests loaded: 14/14`; any that fail fall back to plain emoji.
 
 Queues and teams messages survive bot restarts. Teams messages stay interactive for 12 hours after their last use, queues for a week.
 

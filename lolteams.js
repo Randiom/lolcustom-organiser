@@ -411,6 +411,11 @@ const V2 = MessageFlags.IsComponentsV2;
 const text = (s) => new TextDisplayBuilder().setContent(s);
 const divider = (big = false) => new SeparatorBuilder().setSpacing(big ? SeparatorSpacingSize.Large : SeparatorSpacingSize.Small).setDivider(true);
 // a box with an accent colour and (if the file exists) a banner on top; returns the box and the files to send with it
+// per-view banners in icons/ (match, results, draft, leaderboard); banner.png is the queue's and the fallback
+function art(name) {
+  const f = `${__dirname}/icons/${name}`;
+  return fs.existsSync(f) ? [f, name] : [BANNER, 'banner.png'];
+}
 function box(color, file = BANNER, name = 'banner.png') {
   const c = new ContainerBuilder().setAccentColor(color);
   const files = [];
@@ -438,7 +443,7 @@ function teamTexts(s) {
 
 function renderTeams(s, canMove) {
   const { res, report: rep } = s;
-  const { c, files } = box(rep ? (rep.winner ? RED : BLUE) : GOLD);
+  const { c, files } = box(rep ? (rep.winner ? RED : BLUE) : GOLD, ...art(rep ? 'results.png' : 'match.png'));
   const title = `## ${s.test ? '🧪 ' : ''}${s.game ? `Game ${s.game}` : 'Teams'}` +
     (rep ? ` · ${rep.winner ? '🔴 Red' : '🔵 Blue'} won` : s.drafted ? ' · captain draft' : '');
   const lines = [title, rep
@@ -467,8 +472,9 @@ function renderTeams(s, canMove) {
 
 function renderDraft(s) {
   const d = s.draft, cap0 = draftCaptain(d), turn = pickTeam(d.j);
-  const { c, files } = box(turn ? RED : BLUE);
-  c.addTextDisplayComponents(text(`## ${s.test ? '🧪 ' : ''}Captain draft\n${turn ? '🔴' : '🔵'} ${who(cap0)} **picks next** · ${plural(d.pool.length, 'player')} left`));
+  const { c, files } = box(turn ? RED : BLUE, ...art('draft.png'));
+  const titled = files[0]?.name === 'draft.png'; // the draft banner already says "Captain Draft"
+  c.addTextDisplayComponents(text(`${titled ? (s.test ? '🧪 ' : '') : `## ${s.test ? '🧪 ' : ''}Captain draft\n`}${turn ? '🔴' : '🔵'} ${who(cap0)} **picks next** · ${plural(d.pool.length, 'player')} left`));
   const all = table([...d.teams[0], ...d.teams[1], ...d.pool].map((p) => {
     const k = d.teams[0].indexOf(p) >= 0 ? d.teams[0].indexOf(p) : d.teams[1].indexOf(p);
     // same columns for every row (marker, crest, rank, role, Riot ID, mention) so the widths are shared

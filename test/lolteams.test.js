@@ -435,7 +435,7 @@ test('teams view: one box with banner, title, balance, a section per team (role 
   const box = out.components[0].toJSON();
   assert.equal(box.type, 17);
   assert.equal(box.components[0].type, 12, 'banner on top');
-  assert.equal(box.components[0].items[0].media.url, 'attachment://banner.png');
+  assert.equal(box.components[0].items[0].media.url, 'attachment://match.png');
   const t = texts(out);
   assert.match(t, /^## Teams\n/);
   assert.match(t, /Even match|Close match|favoured/);
@@ -739,7 +739,7 @@ test('practice draft: you pick for both captains, finishes into teams', async ()
   const { w, s } = await startPractice(8);
   await m.handle(tpress(w, 'draft'));
   assert.ok(s.draft);
-  assert.match(body(m.renderDraft(s)), /🧪 Captain draft/);
+  assert.match(body(m.renderDraft(s)), /🧪 .*picks next/);
   while (s.draft) await m.handle(tpress(w, 'pick', U(1), { values: [s.draft.pool[0].id] })); // always the same user
   assert.equal(s.drafted, true);
   assert.deepEqual(s.res.teams.map((t) => t.length), [4, 4]);
@@ -832,11 +832,17 @@ test('rank crests: uploaded as app emojis, used in cards and select menus, fallb
   for (const t of Object.keys(m.crests)) delete m.crests[t];
 });
 
-test('teams message carries the banner image', async () => {
-  const { w, s } = await startPractice(8);
-  const out = m.renderTeams(s, false);
-  assert.equal(out.files.length, 1);
-  assert.equal(out.components[0].toJSON().components[0].items[0].media.url, 'attachment://banner.png');
+test('each view has its own banner: match, results, draft, leaderboard, queue', async () => {
+  const { s } = await startPractice(8);
+  const banner = (p) => [p.files.map((f) => f.name).join(), p.components.at(-1).toJSON().components[0].items[0].media.url];
+  assert.deepEqual(banner(m.renderTeams(s, false)), ['match.png', 'attachment://match.png']);
+  s.report = m.applyResult(s.res, 0, true);
+  assert.deepEqual(banner(m.renderTeams(s, false)), ['results.png', 'attachment://results.png']);
+  s.report = null;
+  s.draft = m.startDraft(s.ps, s.names);
+  assert.deepEqual(banner(m.renderDraft(s)), ['draft.png', 'attachment://draft.png']);
+  assert.deepEqual(banner(m.renderBoard()), ['leaderboard.png', 'attachment://leaderboard.png']);
+  assert.deepEqual(banner(await m.renderQueue({ ids: [], t: 0 })), ['banner.png', 'attachment://banner.png']);
 });
 
 // ── queue ────────────────────────────────────────────────────────────────
@@ -946,7 +952,7 @@ test('queue: draft works from a queue, close is host-only', async () => {
   q.ids = list.slice(0, 6);
   await m.handle(qpress('q:start', list[0]));
   const dr = press(w, 'draft', list[0]); await m.handle(dr);
-  assert.match(body(last(dr, 'editReply')), /Captain draft/);
+  assert.match(body(last(dr, 'editReply')), /picks next/);
   const { q: q2, qpress: qp2, list: l2 } = await openQ();
   q2.ids = [l2[1]];
   const bad = qp2('q:close', l2[1]); await m.handle(bad);
