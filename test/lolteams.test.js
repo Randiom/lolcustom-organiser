@@ -412,23 +412,25 @@ test('Make teams posts the embed, keeps a session, and links back from the panel
   assert.equal(list.length, 10);
 });
 
-test('teams view: header + two colour-coded cards with Role | Player | Rank tables, icons, winner trophy', async () => {
+test('teams view: one embed with header, two team sections of Role | Player | Rank columns, winner trophy', async () => {
   const { s } = await startTeams(10);
-  const [head, blue, red] = m.renderTeams(s, false).embeds.map((e) => e.toJSON());
-  assert.match(head.description, /Even match|Close|Uneven/);
-  assert.ok(head.color !== blue.color && blue.color !== red.color);
-  for (const [card, n] of [[blue, 0], [red, 1]]) {
-    assert.deepEqual(card.fields.map((f) => f.name), ['Role', 'Player', 'Rank']);
-    assert.ok(card.fields.every((f) => f.inline && f.value.split('\n').length === 5)); // one line per player so rows align
-    assert.match(card.fields[0].value, /🛡️ \*\*Top\*\*\n🌲 \*\*Jungle\*\*\n🔮 \*\*Mid\*\*\n🏹 \*\*Bot\*\*\n🩹 \*\*Support\*\*/);
-    assert.match(card.fields[2].value, /^(⚫|🟤|⚪|🟡|🔷|🟢|💎|🟣)/);
-    assert.match(card.title, new RegExp(`${n ? 'Red' : 'Blue'} Team · .+ avg`));
+  const out = m.renderTeams(s, false);
+  assert.equal(out.embeds.length, 1);
+  const e = out.embeds[0].toJSON();
+  assert.match(e.description, /Even match|Close|Uneven/);
+  assert.match(e.fields[0].name, /^🔵 Blue Team · .+ avg/);
+  assert.match(e.fields[4].name, /^🔴 Red Team · .+ avg/);
+  for (const o of [1, 5]) {
+    assert.deepEqual(e.fields.slice(o, o + 3).map((f) => f.name), ['Role', 'Player', 'Rank']);
+    assert.ok(e.fields.slice(o, o + 3).every((f) => f.inline && f.value.split('\n').length === 5)); // one line per player so rows align
+    assert.match(e.fields[o].value, /\*\*Top\*\*\n.*\*\*Jungle\*\*\n.*\*\*Mid\*\*\n.*\*\*Bot\*\*\n.*\*\*Support\*\*/);
+    assert.match(e.fields[o + 2].value, /^(⚫|🟤|⚪|🟡|🔷|🟢|💎|🟣|<:lol_)/);
   }
   s.report = m.applyResult(s.res, 1, true);
-  const done = m.renderTeams(s, false).embeds.map((e) => e.toJSON());
-  assert.match(done[2].title, /^🏆 Red Team/);
-  assert.match(done[1].title, /^🔵 Blue Team/);
-  assert.match(done[0].description, /Red won/);
+  const done = m.renderTeams(s, false).embeds[0].toJSON();
+  assert.match(done.fields[4].name, /^🏆 Red Team/);
+  assert.match(done.fields[0].name, /^🔵 Blue Team/);
+  assert.match(done.description, /Red won/);
 });
 
 test('rank icons: tiers, apex, unranked and unlinked players', async () => {

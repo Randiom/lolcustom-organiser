@@ -378,14 +378,16 @@ function balanceLine(res) {
     : `⚖️ **Uneven** · ${edge} favoured · Δ ${d} avg pts`;
 }
 
-function teamEmbed(s, n) {
+const ZW = '\u200b';
+// One team as embed fields: a full-width title row, then Role | Player | Rank columns
+function teamFields(s, n) {
   const { res, report: rep } = s, t = res.teams[n];
-  return new EmbedBuilder().setColor(n ? RED : BLUE)
-    .setTitle(`${rep?.winner === n ? '🏆' : n ? '🔴' : '🔵'} ${n ? 'Red' : 'Blue'} Team · ${ratingLabel(res.avg[n])} avg`)
-    .addFields(
-      { name: 'Role', value: t.map((p) => `${ROLE_ICON[p.role]} **${cap(p.role)}**`).join('\n'), inline: true },
-      { name: 'Player', value: t.map((p) => who(p)).join('\n'), inline: true },
-      { name: 'Rank', value: t.map((p) => `${p.icon} ${p.label}`).join('\n'), inline: true });
+  return [
+    { name: `${rep?.winner === n ? '🏆' : n ? '🔴' : '🔵'} ${n ? 'Red' : 'Blue'} Team · ${ratingLabel(res.avg[n])} avg`, value: ZW },
+    { name: 'Role', value: t.map((p) => `${ROLE_ICON[p.role]} **${cap(p.role)}**`).join('\n'), inline: true },
+    { name: 'Player', value: t.map((p) => who(p)).join('\n'), inline: true },
+    { name: 'Rank', value: t.map((p) => `${p.icon} ${p.label}`).join('\n'), inline: true },
+  ];
 }
 
 function renderTeams(s, canMove) {
@@ -398,11 +400,12 @@ function renderTeams(s, canMove) {
   if (res.duoIgnored) lines.push('⚠️ Duo partners couldn\'t be kept together with this player count.');
   const head = new EmbedBuilder().setColor(BLURPLE).setDescription(lines.join('\n'))
     .setTitle((s.test ? '🧪 ' : '') + (rep ? `Teams · ${rep.winner ? '🔴 Red' : '🔵 Blue'} won` : s.drafted ? 'Teams · captain draft' : 'Teams'));
+  head.addFields(...teamFields(s, 0), ...teamFields(s, 1));
   const files = [];
   if (fs.existsSync(BANNER)) { head.setImage('attachment://banner.png'); files.push(new AttachmentBuilder(BANNER, { name: 'banner.png' })); }
-  const embeds = [head, teamEmbed(s, 0), teamEmbed(s, 1)];
+  const embeds = [head];
   const foot = [res.flagged && `* counted as ${ratingLabel(DEFAULT_RATING)}`, s.test && 'practice lobby, not saved'].filter(Boolean);
-  if (foot.length) embeds[2].setFooter({ text: foot.join(' · ') });
+  if (foot.length) head.setFooter({ text: foot.join(' · ') });
 
   if (rep) return { embeds, files, components: [rowOf(btn('undo', 'Undo result', ButtonStyle.Secondary))] };
   const top = s.moved ? rowOf(btn('back', 'Move everyone back', ButtonStyle.Primary))
@@ -415,14 +418,15 @@ function renderDraft(s) {
   const d = s.draft, c = draftCaptain(d), turn = pickTeam(d.j);
   const head = new EmbedBuilder().setColor(turn ? RED : BLUE).setTitle(`${s.test ? '🧪 ' : ''}Captain draft`)
     .setDescription(`${turn ? '🔴' : '🔵'} ${who(c)} **picks next** · ${d.pool.length} player${d.pool.length === 1 ? '' : 's'} left`);
-  const card = (n) => new EmbedBuilder().setColor(n ? RED : BLUE).setTitle(`${n ? '🔴 Red' : '🔵 Blue'} Team`)
-    .addFields(
-      { name: 'Player', value: d.teams[n].map((p, i) => `${i ? '▫️' : '👑'} ${who(p)}`).join('\n'), inline: true },
-      { name: 'Rank', value: d.teams[n].map((p) => `${p.icon} ${p.label}`).join('\n'), inline: true });
+  const card = (n) => [
+    { name: `${n ? '🔴 Red' : '🔵 Blue'} Team`, value: ZW },
+    { name: 'Player', value: d.teams[n].map((p, i) => `${i ? '▫️' : '👑'} ${who(p)}`).join('\n'), inline: true },
+    { name: 'Rank', value: d.teams[n].map((p) => `${p.icon} ${p.label}`).join('\n'), inline: true }];
+  head.addFields(...card(0), ...card(1));
   const menu = new StringSelectMenuBuilder().setCustomId('pick').setPlaceholder(`${turn ? '🔴' : '🔵'} Pick a player`)
     .addOptions(d.pool.map((p) => new StringSelectMenuOptionBuilder()
       .setLabel((d.names[p.id] || p.id).slice(0, 100)).setDescription(p.label.replace('*', '')).setValue(p.id).setEmoji(emojiOf(p.icon))));
-  return { embeds: [head, card(0), card(1)], components: [rowOf(menu), rowOf(btn('cancel', 'Cancel draft', ButtonStyle.Secondary))] };
+  return { embeds: [head], components: [rowOf(menu), rowOf(btn('cancel', 'Cancel draft', ButtonStyle.Secondary))] };
 }
 
 // ── rendering: leaderboard + personal panel ──────────────────────────────
