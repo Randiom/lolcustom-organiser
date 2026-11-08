@@ -430,17 +430,21 @@ function renderDraft(s) {
 }
 
 // ── rendering: leaderboard + personal panel ──────────────────────────────
+const LB_FILE = `${__dirname}/icons/leaderboard.png`;
+const LB_BANNER = fs.existsSync(LB_FILE) ? [new AttachmentBuilder(LB_FILE, { name: 'leaderboard.png' })] : [];
+
 function boardEmbed() {
   const rows = Object.entries(db.users).map(([id, u]) => {
     const base = u.override ?? (u.puuid ? db.ranks[u.puuid]?.rating : null) ?? DEFAULT_RATING;
     return { id, w: u.w || 0, l: u.l || 0, adj: u.adj || 0, base, rating: base + (u.adj || 0) };
   }).filter((r) => r.w + r.l > 0).sort((a, b) => b.rating - a.rating || b.w - a.w).slice(0, 10);
   const medal = ['🥇', '🥈', '🥉'];
-  return new EmbedBuilder().setColor(0xf1c40f).setTitle('🏆 In-house leaderboard')
+  const e = new EmbedBuilder().setColor(0xf1c40f).setTitle('🏆 In-house leaderboard')
     .setDescription(rows.length
       ? rows.map((r, i) => `${medal[i] ?? `**${i + 1}.**`} <@${r.id}> · ${rankIcon(r.base)} ${ratingLabel(r.rating)} (${signed(r.adj)}) · **${r.w}**W **${r.l}**L`).join('\n')
       : 'No results yet. Press 🔵 Blue won or 🔴 Red won on a teams message after a game.')
     .setFooter({ text: 'Rating = Riot rank + in-house adjustment' });
+  return LB_BANNER.length ? e.setImage('attachment://leaderboard.png') : e;
 }
 
 function panel(tid, notice) {
@@ -566,7 +570,7 @@ async function onPanel(i) { // buttons + selects on the ephemeral panel
     save();
     return i.update(panel(tid, v ? `✅ You'll be on the same team as <@${v}> when you're both in the channel.` : '✅ Duo cleared.'));
   }
-  if (act === 'board') return i.reply({ embeds: [boardEmbed()], flags: EPH });
+  if (act === 'board') return i.reply({ embeds: [boardEmbed()], files: LB_BANNER, flags: EPH });
   if (act === 'link') return i.showModal(linkModal(tid));
   if (act === 'rank') return i.showModal(rankModal(tid));
   if (act === 'unlink') {
