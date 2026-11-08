@@ -440,17 +440,21 @@ function renderDraft(s) {
 const LB_FILE = `${__dirname}/icons/leaderboard.png`;
 const LB_BANNER = fs.existsSync(LB_FILE) ? [new AttachmentBuilder(LB_FILE, { name: 'leaderboard.png' })] : [];
 
-function boardEmbed() {
-  const rows = Object.entries(db.users).map(([id, u]) => {
+const record = (u) => { const g = (u.w || 0) + (u.l || 0); return g ? `${u.w || 0}W ${u.l || 0}L · ${Math.round(((u.w || 0) / g) * 100)}%` : 'No games yet'; };
+function boardEmbed(viewer) {
+  const all = Object.entries(db.users).map(([id, u]) => {
     const base = u.override ?? (u.puuid ? db.ranks[u.puuid]?.rating : null) ?? DEFAULT_RATING;
-    return { id, w: u.w || 0, l: u.l || 0, adj: u.adj || 0, base, rating: base + (u.adj || 0) };
-  }).filter((r) => r.w + r.l > 0).sort((a, b) => b.rating - a.rating || b.w - a.w).slice(0, 10);
+    return { id, u, adj: u.adj || 0, base, rating: base + (u.adj || 0), g: (u.w || 0) + (u.l || 0) };
+  }).filter((r) => r.g > 0).sort((a, b) => b.rating - a.rating || (b.u.w || 0) - (a.u.w || 0));
   const medal = ['🥇', '🥈', '🥉'];
-  const e = new EmbedBuilder().setColor(0xf1c40f).setTitle('🏆 In-house leaderboard')
-    .setDescription(rows.length
-      ? rows.map((r, i) => `${medal[i] ?? `**${i + 1}.**`} <@${r.id}> · ${rankIcon(r.base)} ${ratingLabel(r.rating)} (${signed(r.adj)}) · **${r.w}**W **${r.l}**L`).join('\n')
-      : 'No results yet. Press 🔵 Blue won or 🔴 Red won on a teams message after a game.')
-    .setFooter({ text: 'Rating = Riot rank + in-house adjustment' });
+  const line = (r, i) => `${medal[i] ?? `\`${String(i + 1).padStart(2)}\``} ${rankIcon(r.rating)} <@${r.id}> · ${ratingLabel(r.rating)} · ${record(r.u)}` +
+    (r.adj ? ` · ${signed(r.adj)}` : '');
+  const rows = all.slice(0, 10).map(line);
+  const me = viewer ? all.findIndex((r) => r.id === viewer) : -1;
+  if (me >= 10) rows.push('⋯', line(all[me], me));
+  const e = new EmbedBuilder().setColor(GOLD).setTitle('🏆 In-house leaderboard')
+    .setDescription(rows.length ? rows.join('\n') : 'No results yet. Press 🔵 Blue won or 🔴 Red won on a teams message after a game.')
+    .setFooter({ text: `${all.length} player${all.length === 1 ? '' : 's'} ranked · rating = Riot rank + in-house adjustment` });
   return LB_BANNER.length ? e.setImage('attachment://leaderboard.png') : e;
 }
 
@@ -460,42 +464,48 @@ function panel(tid, notice) {
   const roles = u.roles;
   const main = roles?.[0];
   const linked = !!u.puuid;
+  const rating = u.override ?? rk?.rating ?? null;
 
   const accountLine = linked
     ? `[**${u.name}#${u.tag}**](https://op.gg/lol/summoners/${u.region}/${encodeURIComponent(u.name)}-${encodeURIComponent(u.tag)})\n${u.region.toUpperCase()}`
     : 'Not linked';
-  const record = u.w || u.l ? `\nIn-house ${u.w || 0}W ${u.l || 0}L (${signed(u.adj || 0)})` : '';
-  const rankLine = (u.override != null ? `${ratingLabel(u.override)} (manual)`
-    : rk ? `${rk.label}\n<t:${Math.floor(rk.at / 1000)}:R>` : '—') + record;
-  const roleLine = !roles ? 'Not set (fill)' : !roles.length ? 'Fill'
-    : cap(main) + (roles.length > 1 ? `\nalso ${roles.slice(1).map(cap).join(', ')}` : '');
+  const rankLine = u.override != null ? `${rankIcon(u.override)} ${ratingLabel(u.override)}\n-# set manually`
+    : rk ? `${rk.rating != null ? rankIcon(rk.rating) : unrankedIcon()} ${rk.label}\n-# updated <t:${Math.floor(rk.at / 1000)}:R>` : '—';
+  const roleLine = !roles ? 'Not set\n-# counts as Fill' : !roles.length ? '🎲 Fill (any role)'
+    : `${ROLE_ICON[main]} **${cap(main)}**` + (roles.length > 1 ? `\n-# also ${roles.slice(1).map(cap).join(', ')}` : '');
+  const inhouse = (u.w || u.l) ? `${record(u)}\n-# rating ${signed(u.adj || 0)}` : 'No games yet';
   const testN = testLobbies.get(tid);
   const hint = testN ? 'Press Make teams. No voice channel needed.'
     : !linked && u.override == null ? 'Start with Link account.'
     : !roles ? 'Pick your main role so teams can place you.'
-    : 'Join a voice channel, then press Make teams.';
+    : 'Join a voice channel and press Make teams, or use /queue.';
   const testLine = testN && `🧪 Practice lobby: you + ${testN - 1} fake players. Results aren't saved. Run /lol again to leave.`;
 
-  const e = new EmbedBuilder().setTitle('LoL profile').setColor(0x5865f2)
+  const e = new EmbedBuilder().setTitle('League profile').setColor(GOLD)
     .setDescription([`<@${tid}>`, testLine, notice].filter(Boolean).join('\n\n'))
     .addFields(
       { name: 'Account', value: accountLine, inline: true },
       { name: 'Rank', value: rankLine, inline: true },
-      { name: 'Roles', value: roleLine, inline: true })
+      { name: 'Roles', value: roleLine, inline: true },
+      { name: 'In-house', value: inhouse, inline: true },
+      { name: 'Duo', value: u.duo ? `<@${u.duo}>` : 'None', inline: true })
     .setFooter({ text: hint });
+  const crest = `${__dirname}/icons/${rating == null ? 'unranked' : CREST_TIERS[tierOf(rating)]}.png`;
+  const files = [];
+  if ((linked || u.override != null) && fs.existsSync(crest)) { e.setThumbnail('attachment://crest.png'); files.push(new AttachmentBuilder(crest, { name: 'crest.png' })); }
 
   // actions first (state-aware emphasis), pickers below
   const link = btn(`lol:link:${tid}`, linked ? 'Change account' : 'Link account', linked ? ButtonStyle.Secondary : ButtonStyle.Primary);
   const rank = btn(`lol:rank:${tid}`, 'Set rank', ButtonStyle.Secondary);
   const teams = btn(`lol:teams:${tid}`, 'Make teams', linked ? ButtonStyle.Success : ButtonStyle.Secondary);
-  const unlink = btn(`lol:unlink:${tid}`, 'Unlink', ButtonStyle.Danger);
+  const unlink = btn(`lol:unlink:${tid}`, 'Unlink', ButtonStyle.Secondary);
   const board = btn(`lol:board:${tid}`, 'Leaderboard', ButtonStyle.Secondary);
-  const rows = [rowOf(...(linked ? [teams, link, rank, unlink, board] : [link, rank, teams, board]))];
+  const rows = [rowOf(...(linked ? [teams, link, rank, board, unlink] : [link, rank, teams, board]))];
 
   rows.push(rowOf(
     new StringSelectMenuBuilder().setCustomId(`lol:main:${tid}`).setPlaceholder('Main role')
       .addOptions([...ROLES, 'fill'].map((r) => new StringSelectMenuOptionBuilder()
-        .setLabel(r === 'fill' ? 'Fill (any role)' : cap(r)).setValue(r)
+        .setLabel(r === 'fill' ? 'Fill (any role)' : cap(r)).setValue(r).setEmoji(emojiOf(r === 'fill' ? '🎲' : ROLE_ICON[r]))
         .setDefault(roles ? (r === 'fill' ? !roles.length : r === main) : false)))));
   if (main) {
     const opts = ROLES.filter((r) => r !== main);
@@ -503,13 +513,13 @@ function panel(tid, notice) {
       new StringSelectMenuBuilder().setCustomId(`lol:alt:${tid}`).setPlaceholder('Also OK with…')
         .setMinValues(0).setMaxValues(opts.length)
         .addOptions(opts.map((r) => new StringSelectMenuOptionBuilder()
-          .setLabel(cap(r)).setValue(r).setDefault(roles.includes(r))))));
+          .setLabel(cap(r)).setValue(r).setEmoji(emojiOf(ROLE_ICON[r])).setDefault(roles.includes(r))))));
   }
   const duo = new UserSelectMenuBuilder().setCustomId(`lol:duo:${tid}`).setPlaceholder('Duo partner (optional)')
     .setMinValues(0).setMaxValues(1);
   if (u.duo) duo.setDefaultUsers(u.duo);
   rows.push(rowOf(duo));
-  return { embeds: [e], components: rows };
+  return { embeds: [e], files, components: rows };
 }
 
 function linkModal(tid) {
@@ -579,7 +589,7 @@ async function onPanel(i) { // buttons + selects on the ephemeral panel
     save();
     return i.update(panel(tid, v ? `✅ You'll be on the same team as <@${v}> when you're both in the channel.` : '✅ Duo cleared.'));
   }
-  if (act === 'board') return i.reply({ embeds: [boardEmbed()], files: LB_BANNER, flags: EPH });
+  if (act === 'board') return i.reply({ embeds: [boardEmbed(tid)], files: LB_BANNER, flags: EPH });
   if (act === 'link') return i.showModal(linkModal(tid));
   if (act === 'rank') return i.showModal(rankModal(tid));
   if (act === 'unlink') {

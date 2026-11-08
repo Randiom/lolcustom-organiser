@@ -381,7 +381,7 @@ test('panel renders valid components in every state', () => {
     const p = valid(m.panel(U(1), 'hello'));
     assert.ok(p.components.length >= 3 && p.components.length <= 5);
   }
-  assert.match(body(m.panel(U(1))), /In-house 3W 1L/);
+  assert.match(body(m.panel(U(1))), /3W 1L · 75%/);
 });
 
 // ── making teams ─────────────────────────────────────────────────────────
@@ -569,7 +569,7 @@ test('leaderboard: ranked by rank + adjustment, only players with games, empty s
   const order = [U(4), U(2), U(1)].map((id) => text.indexOf(`<@${id}>`));
   assert.ok(order.every((x) => x > 0) && order[0] < order[1] && order[1] < order[2], text);
   assert.ok(!text.includes(`<@${U(3)}>`));
-  assert.match(text, /\*\*3\*\*W \*\*1\*\*L/);
+  assert.match(text, /3W 1L · 75%/);
   assert.match(text, /🥇/);
   assert.match(text, /\+40/);
   assert.match(text, /−30/);
@@ -885,7 +885,7 @@ test('queue: pops automatically at 10, profile button opens your panel, one queu
   assert.equal(m.sessions.get('msg1').res.teams.flat().length, 10);
   assert.deepEqual(q.ids, []);
   const me = qpress('q:me', list[0]); await m.handle(me);
-  assert.match(body(last(me, 'reply')), /LoL profile/);
+  assert.match(body(last(me, 'reply')), /League profile/);
   assert.ok(last(me, 'reply').flags);
   q.channelId = 'c1';
   const again = mk('cmd', { user: U(2), guild: w.guild, channel: w.channel, over: { commandName: 'queue', channelId: 'c1' } });
@@ -960,4 +960,19 @@ test('play again: posts fresh teams for the same players in a new message, old o
   assert.deepEqual(last(again, 'editReply').components[0].toJSON().components.map((c) => c.label), ['Undo result']);
   const twice = press(w, 'again', list[0], { member: w.members.get(list[0]) }); await m.handle(twice);
   assert.match(last(twice, 'reply').content, /already/);
+});
+
+test('leaderboard shows your own position below the top 10; panel shows your rank crest', () => {
+  reset();
+  for (let k = 1; k <= 12; k++) db.users[U(k)] = { override: 2000 - k * 50, w: 1, l: 1 };
+  const e = m.boardEmbed(U(12)).toJSON();
+  const lines = e.description.split('\n');
+  assert.equal(lines.length, 12);
+  assert.equal(lines[10], '⋯');
+  assert.match(lines[11], new RegExp(`12.*<@${U(12)}>`));
+  assert.equal(m.boardEmbed(U(1)).toJSON().description.split('\n').length, 10);
+  const p = m.panel(U(1));
+  assert.equal(p.embeds[0].toJSON().thumbnail.url, 'attachment://crest.png');
+  assert.match(String(p.files[0].attachment), /icons\/(gold|silver|platinum)\.png$/);
+  assert.equal(m.panel(U(99)).files.length, 0, 'no crest before linking');
 });
