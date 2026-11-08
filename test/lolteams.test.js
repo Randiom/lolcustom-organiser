@@ -1012,3 +1012,26 @@ test('queue: a deleted queue message frees the channel; overlapping joins all sh
   const final = last(presses[2], 'editReply');
   for (const u of list.slice(0, 3)) assert.match(body(final), new RegExp(`<@${u}>`));
 });
+
+test('/leaderboard posts the board publicly', async () => {
+  reset();
+  db.users[U(1)] = { override: 1500, w: 2, l: 1 };
+  const i = mk('cmd', { user: U(1), over: { commandName: 'leaderboard' } });
+  await m.handle(i);
+  const r = last(i, 'reply');
+  assert.ok(!r.flags, 'public');
+  assert.match(body(r), new RegExp(`<@${U(1)}>`));
+});
+
+test('balancing prefers splits where roles fit: two top-only players never share a team', () => {
+  const ps = [
+    { id: 'a', rating: 1000, roles: ['top'], label: 'x', linked: true }, { id: 'b', rating: 1000, roles: ['top'], label: 'x', linked: true },
+    { id: 'c', rating: 1000, roles: ['mid'], label: 'x', linked: true }, { id: 'd', rating: 1000, roles: ['mid'], label: 'x', linked: true },
+  ];
+  for (let k = 0; k < 60; k++) {
+    const res = m.balance(ps);
+    const tops = res.teams.map((t) => t.filter((p) => p.roles[0] === 'top').length);
+    assert.deepEqual(tops, [1, 1]);
+    assert.ok(res.teams.flat().every((p) => p.role === p.roles[0]), 'everyone on their main');
+  }
+});

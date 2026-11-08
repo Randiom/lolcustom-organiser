@@ -194,7 +194,8 @@ function enumerate(units, n, total) { // every way to give team A exactly n>>1 p
   return out;
 }
 // Pick randomly among the splits within TOLERANCE of the best one (never `avoid` if another exists).
-function pickSplit(ps, avoid) {
+// With `score` (lower = better), only the best-scoring of those near-equal splits are considered.
+function pickSplit(ps, avoid, score) {
   const n = ps.length, total = ps.reduce((s, p) => s + p.rating, 0);
   let units = toUnits(ps), duoIgnored = false;
   let all = enumerate(units, n, total);
@@ -206,6 +207,11 @@ function pickSplit(ps, avoid) {
   const lim = all[0].diff + TOLERANCE;
   let pool = all.filter((x) => x.diff <= lim && x.key !== avoid);
   if (!pool.length) { const fresh = all.filter((x) => x.key !== avoid); pool = fresh.length ? [fresh[0]] : [all[0]]; }
+  if (score && pool.length > 1) {
+    for (const x of pool) x.score = score(x.a, ps.filter((p) => !x.a.includes(p)));
+    const best = Math.min(...pool.map((x) => x.score));
+    pool = pool.filter((x) => x.score <= best + 1);
+  }
   const pick = pool[(Math.random() * pool.length) | 0];
   return { A: pick.a, B: ps.filter((p) => !pick.a.includes(p)), key: pick.key, diff: pick.diff, duoIgnored };
 }
@@ -222,6 +228,8 @@ function rolePerms(k) {
   })();
   return (permCache[k] = out);
 }
+// how well a team's preferences fit the roles: the cheapest possible assignment (0 = everyone on their main)
+const roleFit = (team) => Math.min(...rolePerms(team.length).map((perm) => team.reduce((sum, p, i) => sum + roleCost(p.roles || [], perm[i]), 0)));
 // lowest total cost; ties broken randomly. Returns team with .role, ordered top→support.
 function assignRoles(team) {
   const t = team.slice().sort(() => Math.random() - 0.5);
@@ -259,7 +267,7 @@ function compose(ps, A, B, key) {
   };
 }
 function balance(ps, avoid) {
-  let { A, B, key, duoIgnored } = pickSplit(ps, avoid);
+  let { A, B, key, duoIgnored } = pickSplit(ps, avoid, (a, b) => roleFit(a) + roleFit(b)); // prefer splits where roles fit
   if (Math.random() < 0.5) [A, B] = [B, A]; // random side
   const res = compose(ps, A, B, key);
   res.duoIgnored = duoIgnored;
@@ -378,8 +386,8 @@ function balanceLine(res) {
   const verdict = Math.abs(b - 50) <= 5 ? 'Even match' : Math.abs(b - 50) <= 12 ? 'Close match' : `${b > 50 ? 'Blue' : 'Red'} favoured`;
   return `🔵 **${b}%** ${'🟦'.repeat(cells)}${'🟥'.repeat(10 - cells)} **${100 - b}%** 🔴\n-# ⚖️ ${verdict} · ${res.diff.toFixed(0)} pts apart on average`;
 }
-// assigned role vs the player's preferences: '' main, '·' also-ok, ' ↻' off-role (nothing marked for fill players)
 const short = (label) => label.replace(/ \d+LP/, ''); // 'Gold II 61LP' -> 'Gold II' (keeps (set), (flex), *)
+// ' ↻' when a player got a role that is neither their main nor an also-OK role (never for Fill players)
 const offRole = (p) => (!p.roles?.length || p.roles[0] === p.role ? '' : p.roles.includes(p.role) ? '' : ' ↻');
 
 const ZW = '\u200b';
@@ -545,6 +553,7 @@ const commands = [
     .addIntegerOption((o) => o.setName('test').setDescription('Practice lobby with fake players, no voice channel needed (needs Manage Server)')
       .setMinValue(2).setMaxValue(10)),
   new SlashCommandBuilder().setName('queue').setDescription('Open a queue in this channel that anyone can join'),
+  new SlashCommandBuilder().setName('leaderboard').setDescription('Post the in-house leaderboard in this channel'),
 ];
 const isAdmin = (i) => !!i.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
 const canEdit = (i, tid) => i.user.id === tid || isAdmin(i);
@@ -555,6 +564,7 @@ const sessions = new Map(); // public teams message id -> { vcId, res, moved, dr
 
 async function onCommand(i) {
   if (i.commandName === 'queue') return openQueue(i);
+  if (i.commandName === 'leaderboard') return i.reply({ embeds: [boardEmbed()], files: LB_BANNER });
   const tid = i.options.getUser('user')?.id ?? i.user.id;
   if (!canEdit(i, tid)) return i.reply(NOPE);
   const n = i.options.getInteger('test');
@@ -704,7 +714,9 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
       ns = { ...base, queue: s.queue, vcId: s.vcId, origin: s.origin, res: await makeTeams(ids.slice(0, 10), s.res.key) };
     }
     const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
-    const msg = await ch.send(renderTeams(ns, !ns.test && !!vcs));
+    const ping = ns.queue ? ns.res.teams.flat().map((p) => p.id) : [];
+    const msg = await ch.send({ ...(ping.length ? { content: `🔔 **Next game!** ${ping.map((x) => `<@${x}>`).join(' ')}`, allowedMentions: { users: ping } } : {}),
+      ...renderTeams(ns, !ns.test && !!vcs) });
     sessions.set(msg.id, ns);
     s.next = msg.url;
     return i.editReply(renderTeams(s, canMove));
