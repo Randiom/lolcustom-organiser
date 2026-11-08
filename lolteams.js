@@ -929,6 +929,7 @@ async function onQueue(i) {
     q.ids.push(uid);
     await i.deferUpdate();
     const u = db.users[uid];
+    if (u?.puuid && Date.now() - (db.ranks[u.puuid]?.at || 0) > FRESH) await getRank(u, true); // joiners get a fresh rank
     if (!u?.puuid && u?.override == null)
       i.followUp({ content: 'You joined. Press **My profile** to link your Riot account so teams are balanced by your rank.', flags: EPH }).catch(() => {});
     if (q.ids.length >= QMAX) { await popQueue(i, q); return repostQueue(i.channel ?? (await i.guild.channels.fetch(i.channelId)), q, i.message.id); }
