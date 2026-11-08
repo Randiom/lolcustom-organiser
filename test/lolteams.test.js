@@ -813,3 +813,82 @@ test('teams message carries the banner image', async () => {
   assert.equal(out.files.length, 1);
   assert.equal(out.embeds[0].toJSON().image.url, 'attachment://banner.png');
 });
+
+// ── queue ────────────────────────────────────────────────────────────────
+async function openQ(host = U(1)) {
+  reset(); m.queues.clear();
+  const list = ids(6); seed(list);
+  const w = world([]); // nobody needs to be in voice
+  const open = mk('cmd', { user: host, guild: w.guild, channel: w.channel, over: { commandName: 'queue' } });
+  await m.handle(open);
+  const q = [...m.queues.values()][0];
+  const msgId = 'qmsg';
+  m.queues.clear(); m.queues.set(msgId, q);
+  const qpress = (id, user, o = {}) => mk('comp', { customId: id, user, guild: w.guild, channel: w.channel, message: { id: msgId }, ...o });
+  return { w, q, qpress, open, list };
+}
+
+test('queue: /queue posts an empty queue with Join/Leave/Make teams/Close', async () => {
+  const { q, open } = await openQ();
+  assert.equal(q.host, U(1));
+  const out = last(open, 'editReply');
+  assert.match(body(out), /Nobody yet/);
+  assert.deepEqual(out.components[0].toJSON().components.map((c) => c.label), ['Join queue', 'Leave', 'Make teams', 'Close']);
+  assert.equal(out.components[0].toJSON().components[2].disabled, true);
+});
+
+test('queue: join, duplicate join, leave, full queue', async () => {
+  const { q, qpress, list } = await openQ();
+  for (const u of list.slice(0, 2)) await m.handle(qpress('q:join', u));
+  assert.deepEqual(q.ids, list.slice(0, 2));
+  const dup = qpress('q:join', list[0]); await m.handle(dup);
+  assert.match(last(dup, 'reply').content, /already/);
+  const lv = qpress('q:leave', list[0]); await m.handle(lv);
+  assert.deepEqual(q.ids, [list[1]]);
+  const nope = qpress('q:leave', list[0]); await m.handle(nope);
+  assert.match(last(nope, 'reply').content, /not in the queue/);
+  q.ids = ids(10);
+  const full = qpress('q:join', U(99)); await m.handle(full);
+  assert.match(last(full, 'reply').content, /full/);
+});
+
+test('queue: make teams posts a teams message, closes the queue, reroll/results work without voice', async () => {
+  const { w, q, qpress, list } = await openQ();
+  const one = qpress('q:start', list[0]); await m.handle(one);
+  q.ids = list.slice(0, 6); // pretend six joined
+  const outsider = qpress('q:start', U(77)); await m.handle(outsider);
+  assert.match(last(outsider, 'reply').content, /Join the queue/);
+  const go = qpress('q:start', list[0]); await m.handle(go);
+  assert.equal(w.posted.length, 1);
+  assert.match(body(w.posted[0]), /Teams/);
+  assert.equal(m.queues.size, 0);
+  assert.match(body(last(go, 'editReply')), /Teams are ready/);
+  const s = m.sessions.get('msg1');
+  assert.ok(s.queue);
+  assert.equal(s.res.teams.flat().length, 6);
+  assert.ok(!JSON.stringify(w.posted[0].components.map((r) => r.toJSON())).includes('Move'));
+  // a player can reroll without being in voice; strangers cannot
+  const rr = press(w, 'reroll', list[1]); await m.handle(rr);
+  assert.equal(last(rr, 'editReply').embeds.length, 1);
+  const stranger = press(w, 'reroll', U(77)); await m.handle(stranger);
+  assert.match(last(stranger, 'reply').content, /Only players/);
+  const win = press(w, 'win1', list[2]); await m.handle(win);
+  assert.match(body(last(win, 'update')), /Red won/);
+});
+
+test('queue: draft works from a queue, close is host-only', async () => {
+  const { w, q, qpress, list } = await openQ();
+  q.ids = list.slice(0, 6);
+  await m.handle(qpress('q:start', list[0]));
+  const dr = press(w, 'draft', list[0]); await m.handle(dr);
+  assert.match(body(last(dr, 'editReply')), /Captain draft/);
+  const { q: q2, qpress: qp2, list: l2 } = await openQ();
+  q2.ids = [l2[1]];
+  const bad = qp2('q:close', l2[1]); await m.handle(bad);
+  assert.match(last(bad, 'reply').content, /Only the host/);
+  const ok = qp2('q:close', U(1)); await m.handle(ok);
+  assert.match(body(last(ok, 'update')), /Closed/);
+  assert.equal(m.queues.size, 0);
+  const gone = qp2('q:join', l2[1]); await m.handle(gone);
+  assert.match(last(gone, 'reply').content, /expired/);
+});

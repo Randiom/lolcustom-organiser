@@ -5,6 +5,7 @@ Discord bot for League of Legends custom games. Members link their Riot account,
 `/lol` opens a private panel: link account (Riot ID or op.gg link), set roles, duo partner, manual rank, leaderboard, **Make teams**.
 
 ## Features
+- **Queue:** `/queue` posts a sign-up message in the channel. Anyone can press **Join queue** or **Leave** (up to 10). When ready, the host or anyone in the queue presses **Make teams**, and the bot posts balanced teams from the queue, with no voice channel needed. Reroll, Captain draft and results then work for the queued players. The host (or Manage Server) can **Close** it.
 - **Rank-balanced teams** from solo queue rank (flex fallback), with random variety between near-equal splits and a **Reroll** button.
 - **Roles:** a main role plus "also OK with", or Fill. Each team gets one player per role where possible.
 - **Duo partner:** set one on your panel and you are always on the same team when you are both in the channel.
