@@ -13,10 +13,10 @@ Discord bot for League of Legends custom games. Members link their Riot account,
 ## Queue
 `/queue` posts a sign-up message that stays up. People press **Join queue** or **Leave** whenever they like. The message shows each player's rank and main role, the role mix and the average rank.
 
-- At 10 players it pops by itself: teams are posted with a ping to everyone, and the queue empties for the next game.
+- At 10 players it pops by itself: teams are posted with a ping to everyone, and the queue empties and re-posts itself below the teams, so the next sign-up is always at the bottom of the channel.
 - Anyone in the queue can press **Start now** to play with fewer.
 - **My profile** opens your private panel (link account, set roles) straight from the queue.
-- **Host** (the person who opened it, or Manage Server) opens private host tools: remove a player who wandered off, or close the queue.
+- **Host** (the person who opened it, or Manage Server) opens private host tools: remove a player who wandered off, move the queue to the bottom of a busy channel, or close it.
 - One queue per channel. If the message gets deleted, `/queue` makes a new one.
 
 ## Teams

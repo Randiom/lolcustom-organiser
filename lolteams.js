@@ -876,6 +876,16 @@ async function popQueue(i, q) {
   } finally { q.popping = false; }
 }
 
+// re-post the queue as the newest message in the channel (after a game pops, or from host tools) and drop the old one
+async function repostQueue(ch, q, oldId) {
+  const msg = await ch.send(await renderQueue(q));
+  queues.delete(oldId);
+  q.url = msg.url; q.t = Date.now();
+  queues.set(msg.id, q);
+  await Promise.resolve(ch.messages?.delete?.(oldId)).catch(() => {}); // the bot may always delete its own messages
+  return msg;
+}
+
 // joins/leaves can overlap while ranks load; edits go out one at a time and always show the latest list
 const queueEdits = new Map();
 function editQueue(i, q) {
@@ -911,7 +921,7 @@ async function onQueue(i) {
     const u = db.users[uid];
     if (!u?.puuid && u?.override == null)
       i.followUp({ content: 'You joined. Press **My profile** to link your Riot account so teams are balanced by your rank.', flags: EPH }).catch(() => {});
-    if (q.ids.length >= QMAX) await popQueue(i, q);
+    if (q.ids.length >= QMAX) { await popQueue(i, q); return repostQueue(i.channel ?? (await i.guild.channels.fetch(i.channelId)), q, i.message.id); }
     return editQueue(i, q);
   }
   if (id === 'q:leave') {
@@ -926,7 +936,7 @@ async function onQueue(i) {
     if (q.ids.length < 2) return no('Need at least 2 players.');
     await i.deferUpdate();
     await popQueue(i, q);
-    return editQueue(i, q);
+    return repostQueue(i.channel ?? (await i.guild.channels.fetch(i.channelId)), q, i.message.id);
   }
   await i.deferUpdate();
   return editQueue(i, q);
@@ -939,7 +949,7 @@ async function hostMenu(i, qid, q, notice) {
   const rows = [];
   if (q.ids.length) rows.push(rowOf(new StringSelectMenuBuilder().setCustomId(`qh:kick:${qid}`).setPlaceholder('Remove a player…')
     .addOptions(q.ids.map((id) => new StringSelectMenuOptionBuilder().setLabel(names[id].slice(0, 100)).setValue(id)))));
-  rows.push(rowOf(btn(`qh:close:${qid}`, 'Close queue', ButtonStyle.Danger)));
+  rows.push(rowOf(btn(`qh:bump:${qid}`, 'Move to bottom', ButtonStyle.Secondary), btn(`qh:close:${qid}`, 'Close queue', ButtonStyle.Danger)));
   return { content: [`**Host tools** · ${q.ids.length}/${QMAX} in queue`, notice].filter(Boolean).join('\n'), components: rows };
 }
 async function onHost(i) {
@@ -955,6 +965,10 @@ async function onHost(i) {
     q.ids = q.ids.filter((x) => x !== gone); q.t = Date.now();
     await publicMsg?.edit(await renderQueue(q)).catch((e) => console.error('queue edit failed:', e.message));
     return i.editReply(await hostMenu(i, qid, q, `Removed <@${gone}>.`));
+  }
+  if (act === 'bump') {
+    const msg = await repostQueue(ch, q, qid);
+    return i.editReply({ content: `Queue moved to the bottom: ${msg.url}`, components: [] });
   }
   if (act === 'close') {
     queues.delete(qid);

@@ -858,13 +858,14 @@ test('queue: start posts a pinging teams message, queue resets and stays open; r
   const outsider = qpress('q:start', U(77)); await m.handle(outsider);
   assert.match(last(outsider, 'reply').content, /Join the queue/);
   const go = qpress('q:start', list[0]); await m.handle(go);
-  assert.equal(w.posted.length, 1);
+  assert.equal(w.posted.length, 2, 'teams, then the queue re-posted below them');
   assert.match(w.posted[0].content, /Match ready/);
   assert.deepEqual(w.posted[0].allowedMentions.users, list.slice(0, 6));
   assert.equal(m.queues.size, 1, 'queue stays open');
+  assert.equal(m.queues.get('msg2'), q, 'under its new message id');
   assert.deepEqual(q.ids, []);
   assert.equal(q.games, 1);
-  assert.match(body(last(go, 'editReply')), /Last match/);
+  assert.match(body(w.posted[1]), /Last match/);
   const s = m.sessions.get('msg1');
   assert.ok(s.queue);
   assert.equal(s.res.teams.flat().length, 6);
@@ -881,10 +882,11 @@ test('queue: pops automatically at 10, profile button opens your panel, one queu
   const { w, q, qpress, list, open } = await openQ();
   q.ids = ids(9);
   const tenth = qpress('q:join', U(10)); await m.handle(tenth);
-  assert.equal(w.posted.length, 1);
+  assert.equal(w.posted.length, 2);
   assert.equal(m.sessions.get('msg1').res.teams.flat().length, 10);
   assert.deepEqual(q.ids, []);
-  const me = qpress('q:me', list[0]); await m.handle(me);
+  assert.match(body(w.posted[1]), /Custom game queue/);
+  const me = qpress('q:me', list[0], { message: { id: 'msg2' } }); await m.handle(me);
   assert.match(body(last(me, 'reply')), /League profile/);
   assert.ok(last(me, 'reply').flags);
   q.channelId = 'c1';
@@ -982,14 +984,14 @@ test('live state: queues and teams messages survive a restart', async () => {
   await m.handle(qpress('q:join', list[0]));
   q.ids = list.slice(0, 4);
   await m.handle(qpress('q:start', list[0]));
-  await m.handle(qpress('q:join', list[5]));
+  await m.handle(qpress('q:join', list[5], { message: { id: 'msg2' } }));
   const sess = JSON.stringify(m.sessions.get('msg1').res.teams);
   const onDisk = JSON.parse(fs.readFileSync(process.env.DB_FILE, 'utf8'));
-  assert.deepEqual(Object.keys(onDisk.live.queues), ['qmsg']);
-  assert.deepEqual(onDisk.live.queues.qmsg.ids, [list[5]]);
+  assert.deepEqual(Object.keys(onDisk.live.queues), ['msg2']);
+  assert.deepEqual(onDisk.live.queues.msg2.ids, [list[5]]);
   m.queues.clear(); m.sessions.clear();
   m.db.live = onDisk.live; m.restoreLive();
-  assert.deepEqual(m.queues.get('qmsg').ids, [list[5]]);
+  assert.deepEqual(m.queues.get('msg2').ids, [list[5]]);
   assert.equal(JSON.stringify(m.sessions.get('msg1').res.teams), sess);
   // stale entries are dropped
   m.queues.clear(); m.sessions.clear();
@@ -1094,4 +1096,18 @@ test('recent form: history recorded, undo removes it, streak shown on panel and 
   assert.match(m.boardEmbed().toJSON().description, /🔥3/);
   for (let k = 0; k < 12; k++) m.applyResult(res, 1);
   assert.equal(db.users[U(1)].hist.length, 10, 'only the last 10 are kept');
+});
+
+test('queue host tools: move to bottom re-posts the queue and deletes the old message', async () => {
+  const { w, q } = await openQ();
+  q.ids = [U(2)];
+  const deleted = [];
+  const ch = { ...w.channel, messages: { fetch: async (id) => ({ id, edit: async () => {} }), delete: async (id) => { deleted.push(id); } } };
+  const bump = mk('comp', { customId: 'qh:bump:qmsg', user: U(1), guild: w.guild, channel: ch });
+  await m.handle(bump);
+  assert.deepEqual(deleted, ['qmsg']);
+  assert.equal(m.queues.get('msg1'), q);
+  assert.ok(!m.queues.has('qmsg'));
+  assert.match(body(w.posted[0]), new RegExp(`<@${U(2)}>`));
+  assert.match(last(bump, 'editReply').content, /moved to the bottom/);
 });
