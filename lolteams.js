@@ -371,12 +371,15 @@ async function loadCrests(app) {
 }
 const BLUE = 0x3b82f6, RED = 0xef4444, BLURPLE = 0x5865f2, GOLD = 0xc8aa6e; // GOLD = League client accent
 
+const winChance = (res) => 1 / (1 + 10 ** ((res.avg[1] - res.avg[0]) / 400)); // Blue's expected score (Elo)
 function balanceLine(res) {
-  const d = res.diff.toFixed(0), edge = res.avg[0] > res.avg[1] ? '🔵' : '🔴';
-  return res.diff <= 30 ? `⚖️ **Even match** · Δ ${d} avg pts`
-    : res.diff <= 100 ? `⚖️ **Close** · slight edge to ${edge} · Δ ${d} avg pts`
-    : `⚖️ **Uneven** · ${edge} favoured · Δ ${d} avg pts`;
+  const b = Math.round(winChance(res) * 100), cells = Math.round(b / 10);
+  const verdict = Math.abs(b - 50) <= 5 ? 'Even match' : Math.abs(b - 50) <= 12 ? 'Close match' : `${b > 50 ? 'Blue' : 'Red'} favoured`;
+  return `🔵 **${b}%** ${'🟦'.repeat(cells)}${'🟥'.repeat(10 - cells)} **${100 - b}%** 🔴\n-# ⚖️ ${verdict} · ${res.diff.toFixed(0)} pts apart on average`;
 }
+// assigned role vs the player's preferences: '' main, '·' also-ok, ' ↻' off-role (nothing marked for fill players)
+const short = (label) => label.replace(/ \d+LP/, ''); // 'Gold II 61LP' -> 'Gold II' (keeps (set), (flex), *)
+const offRole = (p) => (!p.roles?.length || p.roles[0] === p.role ? '' : p.roles.includes(p.role) ? '' : ' ↻');
 
 const ZW = '\u200b';
 // One team as embed fields: a full-width title row, then Role | Player | Rank columns
@@ -384,15 +387,15 @@ function teamFields(s, n) {
   const { res, report: rep } = s, t = res.teams[n];
   return [
     { name: `${rep?.winner === n ? '🏆' : n ? '🔴' : '🔵'} ${n ? 'Red' : 'Blue'} Team`, value: `${rankIcon(res.avg[n])} ${ratingLabel(res.avg[n])} avg` },
-    { name: 'Role', value: t.map((p) => `${ROLE_ICON[p.role]} **${cap(p.role)}**`).join('\n'), inline: true },
+    { name: 'Role', value: t.map((p) => `${ROLE_ICON[p.role]} **${cap(p.role)}**${offRole(p)}`).join('\n'), inline: true },
     { name: 'Player', value: t.map((p) => who(p)).join('\n'), inline: true },
-    { name: 'Rank', value: t.map((p) => `${p.icon} ${p.label}`).join('\n'), inline: true },
+    { name: rep ? 'Rank · in-house' : 'Rank', value: t.map((p) => `${p.icon} ${rep ? short(p.label) : p.label}` + (rep ? ` **${signed(rep.deltas[p.id] ?? 0)}**` : '')).join('\n'), inline: true },
   ];
 }
 
 function renderTeams(s, canMove) {
   const { res, report: rep } = s;
-  const lines = [rep ? `🏆 **${rep.winner ? 'Red' : 'Blue'} won** · in-house rating: winners ${signed(rep.d)}, losers ${signed(-rep.d)}` : balanceLine(res)];
+  const lines = [rep ? `🏆 **${rep.winner ? 'Red' : 'Blue'} won!** Winners ${signed(rep.d)}, losers ${signed(-rep.d)} in-house rating${rep.dry ? ' (practice, not saved)' : ''}.` : balanceLine(res)];
   if (res.unlinked.length) {
     const mentions = res.unlinked.map((id) => `<@${id}>`).join(' ');
     lines.push(`⚠️ ${mentions} ${res.unlinked.length > 1 ? "haven't" : "hasn't"} linked an account. Use /lol to link.`);
@@ -404,10 +407,13 @@ function renderTeams(s, canMove) {
   const files = [];
   if (fs.existsSync(BANNER)) { head.setImage('attachment://banner.png'); files.push(new AttachmentBuilder(BANNER, { name: 'banner.png' })); }
   const embeds = [head];
-  const foot = [res.flagged && `* counted as ${ratingLabel(DEFAULT_RATING)}`].filter(Boolean);
+  const off = res.teams.flat().some((p) => offRole(p));
+  const foot = [res.flagged && `* counted as ${ratingLabel(DEFAULT_RATING)}`, off && '↻ off-role'].filter(Boolean);
   if (foot.length) head.setFooter({ text: foot.join(' · ') });
 
-  if (rep) return { embeds, files, components: [rowOf(btn('undo', 'Undo result', ButtonStyle.Secondary))] };
+  if (s.next) lines.push(`➡️ [Next game](${s.next})`);
+  head.setDescription(lines.join('\n'));
+  if (rep) return { embeds, files, components: [rowOf(...(s.next ? [] : [btn('again', 'Play again', ButtonStyle.Success)]), btn('undo', 'Undo result', ButtonStyle.Secondary))] };
   const top = s.moved ? rowOf(btn('back', 'Move everyone back', ButtonStyle.Primary))
     : rowOf(btn('reroll', 'Reroll', ButtonStyle.Primary), btn('draft', 'Captain draft', ButtonStyle.Secondary),
       ...(canMove ? [btn('move', 'Move to team channels', ButtonStyle.Secondary)] : []));
@@ -419,10 +425,11 @@ function renderDraft(s) {
   const head = new EmbedBuilder().setColor(turn ? RED : BLUE).setTitle(`${s.test ? '🧪 ' : ''}Captain draft`)
     .setDescription(`${turn ? '🔴' : '🔵'} ${who(c)} **picks next** · ${d.pool.length} player${d.pool.length === 1 ? '' : 's'} left`);
   const card = (n) => [
-    { name: `${n ? '🔴 Red' : '🔵 Blue'} Team`, value: ZW },
-    { name: 'Player', value: d.teams[n].map((p, i) => `${i ? '▫️' : '👑'} ${who(p)}`).join('\n'), inline: true },
-    { name: 'Rank', value: d.teams[n].map((p) => `${p.icon} ${p.label}`).join('\n'), inline: true }];
-  head.addFields(...card(0), ...card(1));
+    { name: `${n ? '🔴 Red' : '🔵 Blue'} Team`, value: (() => { const a = d.teams[n].reduce((x, p) => x + p.rating, 0) / d.teams[n].length; return `${rankIcon(a)} ${ratingLabel(a)} avg · ${d.teams[n].length} player${d.teams[n].length === 1 ? '' : 's'}`; })() },
+    { name: 'Player', value: d.teams[n].map((p, i) => `${i ? `\`${i + 1}\`` : '👑'} ${who(p)}`).join('\n'), inline: true },
+    { name: 'Rank', value: d.teams[n].map((p) => `${p.icon} ${short(p.label)}`).join('\n'), inline: true }];
+  head.addFields(...card(0), ...card(1), { name: `Available · ${d.pool.length}`,
+    value: d.pool.map((p) => `${p.icon} ${who(p)} · ${short(p.label)} · ${p.roles?.[0] ? ROLE_ICON[p.roles[0]] : 'Fill'}`).join('\n') || ZW });
   const menu = new StringSelectMenuBuilder().setCustomId('pick').setPlaceholder(`${turn ? '🔴' : '🔵'} Pick a player`)
     .addOptions(d.pool.map((p) => new StringSelectMenuOptionBuilder()
       .setLabel((d.names[p.id] || p.id).slice(0, 100)).setDescription(p.label.replace('*', '')).setValue(p.id).setEmoji(emojiOf(p.icon))));
@@ -672,6 +679,24 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
     if (s.draft) return i.reply({ content: 'Finish or cancel the draft first.', flags: EPH });
     s.report = applyResult(s.res, id === 'win1' ? 1 : 0, !!s.test);
     return i.update(renderTeams(s, canMove));
+  }
+  if (id === 'again') { // same players, fresh teams in a new message; this one keeps the result
+    if (!mayReport) return i.reply(noReport);
+    if (!s.report || s.next) return i.reply({ content: s.next ? 'Next game already started.' : 'Report the result first.', flags: EPH });
+    await i.deferUpdate();
+    const base = { owner: s.owner, moved: false, t: Date.now() };
+    let ns;
+    if (s.test) ns = { ...base, test: true, ps: s.ps, names: s.names, res: balance(s.ps, s.res.key) };
+    else {
+      const vc = s.vcId && i.guild.channels.cache.get(s.vcId);
+      const ids = !s.queue && vc && humans(vc).length >= 2 ? humans(vc) : s.res.teams.flat().map((p) => p.id);
+      ns = { ...base, queue: s.queue, vcId: s.vcId, origin: s.origin, res: await makeTeams(ids.slice(0, 10), s.res.key) };
+    }
+    const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
+    const msg = await ch.send(renderTeams(ns, !ns.test && !!vcs));
+    sessions.set(msg.id, ns);
+    s.next = msg.url;
+    return i.editReply(renderTeams(s, canMove));
   }
   if (id === 'undo') {
     if (!mayReport) return i.reply(noReport);

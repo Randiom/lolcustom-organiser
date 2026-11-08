@@ -94,7 +94,7 @@ function world(players, { teamChannels = true } = {}) {
 }
 
 const reset = () => {
-  db.users = {}; db.ranks = {}; m.sessions.clear(); riotCalls.length = 0; riotMode = 'ok'; sent429 = false;
+  db.users = {}; db.ranks = {}; m.sessions.clear(); m.testLobbies.clear(); m.queues.clear(); riotCalls.length = 0; riotMode = 'ok'; sent429 = false;
 };
 const seed = (list, f = (i) => 800 + i * 150) => list.forEach((id, i) => { db.users[id] = { override: f(i) }; });
 const ids = (n) => Array.from({ length: n }, (_, i) => U(i + 1));
@@ -514,7 +514,7 @@ test('Blue/Red won updates records, adjusts balancing ratings, can be undone', a
   const win = press(w, 'win1', U(3));
   await m.handle(win);
   assert.match(body(last(win, 'update')), /Red won/);
-  assert.deepEqual(last(win, 'update').components.map((r) => r.toJSON().components.map((c) => c.label)), [['Undo result']]);
+  assert.deepEqual(last(win, 'update').components.map((r) => r.toJSON().components.map((c) => c.label)), [['Play again', 'Undo result']]);
   s.res.teams[1].forEach((p) => { assert.equal(db.users[p.id].w, 1); assert.ok(db.users[p.id].adj > 0); });
   s.res.teams[0].forEach((p) => { assert.equal(db.users[p.id].l, 1); assert.ok(db.users[p.id].adj < 0); });
   const sum = Object.values(db.users).reduce((t, u) => t + (u.adj || 0), 0);
@@ -929,4 +929,35 @@ test('queue: draft works from a queue, close is host-only', async () => {
   assert.equal(m.queues.size, 0);
   const gone = qp2('q:join', l2[1]); await m.handle(gone);
   assert.match(last(gone, 'reply').content, /expired/);
+});
+
+test('teams view: win-chance bar, off-role marker, result shows per-player rating change', async () => {
+  const { s } = await startTeams(10);
+  const e = m.renderTeams(s, false).embeds[0].toJSON();
+  assert.match(e.description, /🔵 \*\*\d+%\*\* (🟦|🟥){10} \*\*\d+%\*\* 🔴/);
+  // force an off-role assignment
+  const p = s.res.teams[0][0]; p.roles = ['support']; p.role = 'top';
+  const e2 = m.renderTeams(s, false).embeds[0].toJSON();
+  assert.match(e2.fields[1].value, /Top\*\* ↻/);
+  assert.match(e2.footer.text, /off-role/);
+  s.report = m.applyResult(s.res, 0, true);
+  const e3 = m.renderTeams(s, false).embeds[0].toJSON();
+  assert.equal(e3.fields[3].name, 'Rank · in-house');
+  assert.match(e3.fields[3].value, /\*\*\+\d+\*\*/);
+  assert.match(e3.fields[7].value, /\*\*−\d+\*\*/);
+});
+
+test('play again: posts fresh teams for the same players in a new message, old one keeps the result', async () => {
+  const { w, s, list } = await startTeams(6);
+  await m.handle(press(w, 'win0', list[0], { member: w.members.get(list[0]) }));
+  const before = w.posted.length;
+  const again = press(w, 'again', list[0], { member: w.members.get(list[0]), channel: w.channel }); await m.handle(again);
+  assert.equal(w.posted.length, before + 1);
+  const ns = m.sessions.get(`msg${w.posted.length}`);
+  assert.ok(ns && !ns.report);
+  assert.equal(ns.res.teams.flat().length, 6);
+  assert.match(body(last(again, 'editReply')), /Next game/);
+  assert.deepEqual(last(again, 'editReply').components[0].toJSON().components.map((c) => c.label), ['Undo result']);
+  const twice = press(w, 'again', list[0], { member: w.members.get(list[0]) }); await m.handle(twice);
+  assert.match(last(twice, 'reply').content, /already/);
 });
