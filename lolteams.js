@@ -413,7 +413,7 @@ function renderTeams(s, canMove) {
   }
   if (res.duoIgnored) lines.push('⚠️ Duo partners couldn\'t be kept together with this player count.');
   const head = new EmbedBuilder().setColor(BLURPLE).setDescription(lines.join('\n'))
-    .setTitle((s.test ? '🧪 ' : '') + (rep ? `Teams · ${rep.winner ? '🔴 Red' : '🔵 Blue'} won` : s.drafted ? 'Teams · captain draft' : 'Teams'));
+    .setTitle((s.test ? '🧪 ' : '') + (s.game ? `Game ${s.game}` : 'Teams') + (rep ? ` · ${rep.winner ? '🔴 Red' : '🔵 Blue'} won` : s.drafted ? ' · captain draft' : ''));
   head.addFields(...teamFields(s, 0), ...teamFields(s, 1));
   const files = withBanner(head);
   const embeds = [head];
@@ -730,7 +730,9 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
     else {
       const vc = s.vcId && i.guild.channels.cache.get(s.vcId);
       const ids = !s.queue && vc && humans(vc).length >= 2 ? humans(vc) : s.res.teams.flat().map((p) => p.id);
-      ns = { ...base, queue: s.queue, vcId: s.vcId, origin: s.origin, res: await makeTeams(ids.slice(0, 10), s.res.key) };
+      const q = s.queue && [...queues.values()].find((x) => x.channelId === i.channelId); // keep the queue's game count in step
+      if (q) q.games = (q.games || 0) + 1;
+      ns = { ...base, queue: s.queue, game: q ? q.games : undefined, vcId: s.vcId, origin: s.origin, res: await makeTeams(ids.slice(0, 10), s.res.key) };
     }
     const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
     const ping = ns.queue ? ns.res.teams.flat().map((p) => p.id) : [];
@@ -873,7 +875,7 @@ async function popQueue(i, q) {
   q.popping = true;
   try {
     const ids = q.ids.slice();
-    const s = { queue: true, owner: q.host, res: await makeTeams(ids), moved: false, t: Date.now() };
+    const s = { queue: true, owner: q.host, game: (q.games || 0) + 1, res: await makeTeams(ids), moved: false, t: Date.now() };
     const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
     const msg = await ch.send({ content: `🔔 **Match ready!** ${ids.map((id) => `<@${id}>`).join(' ')}`,
       allowedMentions: { users: ids }, ...renderTeams(s, !!teamVcs(i.guild)) });

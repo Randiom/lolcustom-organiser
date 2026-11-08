@@ -1135,3 +1135,15 @@ test('season reset: admin-only, confirm step, archives standings and clears resu
   assert.equal(db.users[U(2)].override, 900);
   assert.match(m.boardEmbed().toJSON().description, /No results yet/);
 });
+
+test('queue games are numbered, Play again continues the count', async () => {
+  const { w, q, qpress, list } = await openQ();
+  q.ids = list.slice(0, 4);
+  await m.handle(qpress('q:start', list[0]));
+  assert.match(body(w.posted[0]), /"title":"Game 1"/);
+  const s = m.sessions.get('msg1');
+  await m.handle(press(w, 'win0', s.res.teams[0][0].id, { channel: w.channel }));
+  await m.handle(press(w, 'again', s.res.teams[0][0].id, { channel: w.channel, channelId: 'c1' }));
+  assert.match(body(w.posted[2]), /"title":"Game 2"/);
+  assert.equal(q.games, 2);
+});
