@@ -445,8 +445,11 @@ test('teams view: one box with banner, title, balance, a section per team (role 
   for (const team of [blue, red]) {
     const rows = team.trim().split('\n').slice(1).filter((l) => !l.startsWith('-#'));
     assert.equal(rows.length, 5);
-    assert.deepEqual(rows.map((r) => /\*\*(\w+)\*\*/.exec(r)[1]), ['Top', 'Jungle', 'Mid', 'Bot', 'Support']);
-    for (const r of rows) assert.match(r, /\*\* · <@\d+> · (⚫|🟤|⚪|🟡|🔷|🟢|💎|🟣|<:lol_)/);
+    assert.deepEqual(rows.map((r) => /`(\w+)/.exec(r)[1]), ['Top', 'Jungle', 'Mid', 'Bot', 'Support']);
+    // role · crest · rank · Riot ID · mention, with each code cell the same width on every row so the columns line up
+    for (const r of rows) assert.match(r, /^\S+ `[^`]+` (⚫|🟤|⚪|🟡|🔷|🟢|💎|🟣|❔|⚠️|<:lol_)\S* `[^`]+` `[^`]+` <@\d+>$/);
+    const widths = rows.map((r) => [...r.matchAll(/`([^`]+)`/g)].map((x) => [...x[1]].length).join(','));
+    assert.equal(new Set(widths).size, 1, widths.join(' | '));
   }
   s.report = m.applyResult(s.res, 1, true);
   const done = texts(m.renderTeams(s, false));
@@ -591,7 +594,7 @@ test('leaderboard: ranked by rank + adjustment, only players with games, empty s
   const order = [U(4), U(2), U(1)].map((id) => text.indexOf(`<@${id}>`));
   assert.ok(order.every((x) => x > 0) && order[0] < order[1] && order[1] < order[2], text);
   assert.ok(!text.includes(`<@${U(3)}>`));
-  assert.match(text, /3W 1L · 75%/);
+  assert.match(text, /`3W 1L` `75%/);
   assert.match(text, /🥇/);
   assert.match(text, /\+40/);
   assert.match(text, /−30/);
@@ -960,12 +963,12 @@ test('teams view: win-chance bar, off-role marker, result shows per-player ratin
   assert.match(texts(m.renderTeams(s, false)), /🔵 \*\*\d+%\*\* (🟦|🟥){10} \*\*\d+%\*\* 🔴/);
   const p = s.res.teams[0][0]; p.roles = ['support']; p.role = 'top';
   const t2 = texts(m.renderTeams(s, false));
-  assert.match(t2, /\*\*Top\*\* ↻ · /);
+  assert.match(t2, /`Top ↻/);
   assert.match(t2, /-# .*↻ off-role/);
   s.report = m.applyResult(s.res, 0, true);
   const [blue, red] = texts(m.renderTeams(s, false)).split('### ').slice(1);
-  assert.match(blue, /\*\*\+\d+\*\*/);
-  assert.match(red, /\*\*−\d+\*\*/);
+  assert.match(blue, /`\+\d+\s*`/);
+  assert.match(red, /`−\d+\s*`/);
 });
 
 test('play again: posts fresh teams for the same players in a new message, old one keeps the result', async () => {

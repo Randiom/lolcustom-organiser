@@ -254,7 +254,7 @@ async function buildPlayers(ids) {
       const r = await getRank(u);
       if (r.rating != null) { base = r.rating; label = r.label; icon = rankIcon(base); } else { label = 'Unranked*'; icon = unrankedIcon(); }
     }
-    ps.push({ id, rating: base + (u?.adj || 0), label, icon, linked, roles: u?.roles || [], duo: u?.duo });
+    ps.push({ id, rating: base + (u?.adj || 0), label, icon, linked, roles: u?.roles || [], duo: u?.duo, riot: u?.puuid ? `${u.name}#${u.tag}` : undefined });
   }
   return ps;
 }
@@ -286,7 +286,7 @@ function fakePlayers(count, ownerId, withDuo) {
     const alts = ROLES.filter((r) => r !== main && Math.random() < 0.4);
     const duo = withDuo && i === 0; // your duo setting makes "Test 1" your partner
     return {
-      id: `test:${i + 1}`, name: `Test ${i + 1}${duo ? ' 🤝' : ''}`, rating, label: `${ratingLabel(rating)}`, icon: rankIcon(rating), linked: true,
+      id: `test:${i + 1}`, name: `Test ${i + 1}${duo ? ' 🤝' : ''}`, riot: `Test${i + 1}#TEST`, rating, label: `${ratingLabel(rating)}`, icon: rankIcon(rating), linked: true,
       roles: Math.random() < 0.2 ? [] : [main, ...alts], duo: duo ? ownerId : undefined,
     };
   });
@@ -389,6 +389,18 @@ function balanceLine(res) {
   const verdict = Math.abs(b - 50) <= 5 ? 'Even match' : Math.abs(b - 50) <= 12 ? 'Close match' : `${b > 50 ? 'Blue' : 'Red'} favoured`;
   return `🔵 **${b}%** ${'🟦'.repeat(cells)}${'🟥'.repeat(10 - cells)} **${100 - b}%** 🔴\n-# ⚖️ ${verdict} · ${res.diff.toFixed(0)} pts apart on average`;
 }
+const NB = '\u00a0';
+// Monospace table: string items become fixed-width code cells (padded with no-break spaces so Discord keeps the width),
+// { raw } items pass through. Every row's cells line up because each column gets the width of its longest entry.
+function table(rows, max = 22) {
+  const w = [];
+  for (const r of rows) r.forEach((x, k) => { if (typeof x === 'string') w[k] = Math.min(max, Math.max(w[k] || 0, [...x].length)); });
+  const cell = (x, k) => { const c = [...x]; return '`' + (c.length > w[k] ? c.slice(0, w[k] - 1).join('') + '…' : x + NB.repeat(w[k] - c.length)) + '`'; };
+  return rows.map((r) => r.map((x, k) => (typeof x === 'string' ? cell(x, k) : x.raw)).filter(Boolean).join(' '));
+}
+const raw = (x) => ({ raw: x });
+const riotOf = (p) => p.riot || '—';
+const roleCell = (r) => (r ? [raw(ROLE_ICON[r]), cap(r)] : [raw('🎲'), 'Fill']);
 const short = (label) => label.replace(/ \d+LP/, ''); // 'Gold II 61LP' -> 'Gold II' (keeps (set), (flex), *)
 // ' ↻' when a player got a role that is neither their main nor an also-OK role (never for Fill players)
 const offRole = (p) => (!p.roles?.length || p.roles[0] === p.role ? '' : p.roles.includes(p.role) ? '' : ' ↻');
@@ -414,12 +426,14 @@ const ed = (i, p) => edm(i.message, p);
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
 // ── rendering: public teams message ──────────────────────────────────────
-function teamText(s, n) {
-  const { res, report: rep } = s, t = res.teams[n];
-  const head = `### ${rep?.winner === n ? '🏆' : n ? '🔴' : '🔵'} ${n ? 'Red' : 'Blue'} Team  ·  ${rankIcon(res.avg[n])} ${ratingLabel(res.avg[n])} avg`;
-  const rows = t.map((p) => `${ROLE_ICON[p.role]} **${cap(p.role)}**${offRole(p)} · ${who(p)} · ${p.icon} ${short(p.label)}` +
-    (rep ? ` **${signed(rep.deltas[p.id] ?? 0)}**` : ''));
-  return text([head, ...rows].join('\n'));
+// both teams as one table (so Blue's and Red's columns line up too), split back into a block per team
+function teamTexts(s) {
+  const { res, report: rep } = s;
+  const rows = table(res.teams.flat().map((p) => [raw(ROLE_ICON[p.role]), cap(p.role) + offRole(p), raw(p.icon), short(p.label),
+    ...(rep ? [signed(rep.deltas[p.id] ?? 0)] : []), riotOf(p), raw(who(p))]));
+  return [0, 1].map((n) => text([
+    `### ${rep?.winner === n ? '🏆' : n ? '🔴' : '🔵'} ${n ? 'Red' : 'Blue'} Team  ·  ${rankIcon(res.avg[n])} ${ratingLabel(res.avg[n])} avg`,
+    ...rows.slice(n ? res.teams[0].length : 0, n ? undefined : res.teams[0].length)].join('\n')));
 }
 
 function renderTeams(s, canMove) {
@@ -435,8 +449,9 @@ function renderTeams(s, canMove) {
   if (res.duoIgnored) lines.push('⚠️ Duo partners couldn\'t be kept together with this player count.');
   if (s.next) lines.push(`➡️ [Next game](${s.next})`);
   c.addTextDisplayComponents(text(lines.join('\n')));
-  c.addSeparatorComponents(divider()).addTextDisplayComponents(teamText(s, 0));
-  c.addSeparatorComponents(divider()).addTextDisplayComponents(teamText(s, 1));
+  const [blue, red] = teamTexts(s);
+  c.addSeparatorComponents(divider()).addTextDisplayComponents(blue);
+  c.addSeparatorComponents(divider()).addTextDisplayComponents(red);
   const off = res.teams.flat().some((p) => offRole(p));
   const foot = [res.flagged && `* counted as ${ratingLabel(DEFAULT_RATING)}`, off && '↻ off-role'].filter(Boolean);
   if (foot.length) c.addTextDisplayComponents(text(`-# ${foot.join(' · ')}`));
@@ -454,14 +469,19 @@ function renderDraft(s) {
   const d = s.draft, cap0 = draftCaptain(d), turn = pickTeam(d.j);
   const { c, files } = box(turn ? RED : BLUE);
   c.addTextDisplayComponents(text(`## ${s.test ? '🧪 ' : ''}Captain draft\n${turn ? '🔴' : '🔵'} ${who(cap0)} **picks next** · ${plural(d.pool.length, 'player')} left`));
+  const all = table([...d.teams[0], ...d.teams[1], ...d.pool].map((p) => {
+    const k = d.teams[0].indexOf(p) >= 0 ? d.teams[0].indexOf(p) : d.teams[1].indexOf(p);
+    // same columns for every row (marker, crest, rank, role, Riot ID, mention) so the widths are shared
+    return [raw(k < 0 ? '' : k ? `\`${k + 1}\`` : '👑'), raw(p.icon), short(p.label), ...roleCell(p.roles?.[0]), riotOf(p), raw(who(p))];
+  }));
   for (const n of [0, 1]) {
     const t = d.teams[n], a = t.reduce((x, p) => x + p.rating, 0) / t.length;
+    const from = n ? d.teams[0].length : 0;
     c.addSeparatorComponents(divider()).addTextDisplayComponents(text([
-      `### ${n ? '🔴 Red' : '🔵 Blue'} Team  ·  ${rankIcon(a)} ${ratingLabel(a)} avg`,
-      ...t.map((p, k) => `${k ? `\`${k + 1}\`` : '👑'} ${who(p)} · ${p.icon} ${short(p.label)}`)].join('\n')));
+      `### ${n ? '🔴 Red' : '🔵 Blue'} Team  ·  ${rankIcon(a)} ${ratingLabel(a)} avg`, ...all.slice(from, from + t.length)].join('\n')));
   }
   c.addSeparatorComponents(divider()).addTextDisplayComponents(text([`### Available · ${d.pool.length}`,
-    ...d.pool.map((p) => `${p.icon} ${who(p)} · ${short(p.label)} · ${p.roles?.[0] ? `${ROLE_ICON[p.roles[0]]} ${cap(p.roles[0])}` : '🎲 Fill'}`)].join('\n')));
+    ...all.slice(d.teams[0].length + d.teams[1].length)].join('\n')));
   const menu = new StringSelectMenuBuilder().setCustomId('pick').setPlaceholder(`${turn ? '🔴' : '🔵'} Pick a player`)
     .addOptions(d.pool.map((p) => new StringSelectMenuOptionBuilder()
       .setLabel((d.names[p.id] || p.id).slice(0, 100)).setDescription(p.label.replace('*', '')).setValue(p.id).setEmoji(emojiOf(p.icon))));
@@ -481,11 +501,14 @@ function boardRows(viewer) {
     return { id, u, adj: u.adj || 0, base, rating: base + (u.adj || 0), g: (u.w || 0) + (u.l || 0) };
   }).filter((r) => r.g > 0).sort((a, b) => b.rating - a.rating || (b.u.w || 0) - (a.u.w || 0));
   const medal = ['🥇', '🥈', '🥉'];
-  const line = (r, i) => `${medal[i] ?? `\`${String(i + 1).padStart(2)}\``} ${rankIcon(r.rating)} <@${r.id}> · **${ratingLabel(r.rating)}** · ${record(r.u)}` +
-    (r.adj ? ` · ${signed(r.adj)}` : '') + (streak(r.u) >= 3 ? ` · 🔥${streak(r.u)}` : '');
-  const rows = all.slice(0, 10).map(line);
+  const cells = (r, i) => [raw(medal[i] ?? `\`${String(i + 1).padStart(2)}\``), raw(rankIcon(r.rating)), ratingLabel(r.rating),
+    `${r.u.w || 0}W ${r.u.l || 0}L`, `${Math.round(((r.u.w || 0) / r.g) * 100)}%`, signed(r.adj),
+    raw(`<@${r.id}>${streak(r.u) >= 3 ? ` 🔥${streak(r.u)}` : ''}`)];
   const me = viewer ? all.findIndex((r) => r.id === viewer) : -1;
-  if (me >= 10) rows.push('⋯', line(all[me], me));
+  const picked = all.slice(0, 10).map((r, i) => cells(r, i));
+  if (me >= 10) picked.push(cells(all[me], me));
+  const rows = table(picked);
+  if (me >= 10) rows.splice(10, 0, '⋯');
   return { rows, count: all.length };
 }
 // leaderboard; `viewer` adds their own position when they're outside the top 10
@@ -867,8 +890,8 @@ async function renderQueue(q, closedNote) {
   c.addTextDisplayComponents(text(`## Custom game queue\n${bar}  **${n}/${QMAX}** · ${left ? `${plural(left, 'spot')} left` : 'full'}`));
   c.addSeparatorComponents(divider());
   if (n) {
-    const list = ps.map((p, k) => `\`${String(k + 1).padStart(2)}\` ${p.icon} <@${p.id}> · ${short(p.label).replace(/\*$/, '')}` +
-      ` · ${p.roles?.[0] ? `${ROLE_ICON[p.roles[0]]} ${cap(p.roles[0])}` : '🎲 Fill'}`);
+    const list = table(ps.map((p, k) => [String(k + 1).padStart(2), raw(p.icon), short(p.label).replace(/\*$/, ''),
+      ...roleCell(p.roles?.[0]), riotOf(p), raw(`<@${p.id}>`)]));
     const { line, missing } = roleSummary(ps);
     const avg = ps.reduce((sum, p) => sum + p.rating, 0) / n;
     list.push(`-# Mains ${line} · avg ${ratingLabel(avg)}` + (missing.length && n >= 4 ? `\n-# Nobody plays ${missing.map(cap).join(' or ')} yet` : ''));
