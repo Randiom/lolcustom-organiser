@@ -60,7 +60,7 @@ function mk(kind, o = {}) {
     user: { id: o.user }, memberPermissions: { has: () => !!o.admin }, member: o.member, guild: o.guild, channel: o.channel,
     channelId: 'c1', createdTimestamp: o.createdTimestamp ?? Date.now(), customId: o.customId, values: o.values,
     users: o.users, message: o.message, client: { ws: { ping: 7 } }, deferred: false, replied: false, calls,
-    options: { getUser: () => o.target ?? null, getInteger: () => o.test ?? null },
+    options: { getUser: () => o.target ?? null, getInteger: () => o.test ?? null, getBoolean: () => o.reset ?? null },
     fields: { getTextInputValue: (k) => o.fields[k] },
     isChatInputCommand: () => kind === 'cmd', isModalSubmit: () => kind === 'modal', isMessageComponent: () => kind === 'comp',
     reply: rec('reply'), editReply: rec('editReply'), update: rec('update'), deferUpdate: rec('deferUpdate'),
@@ -1110,4 +1110,28 @@ test('queue host tools: move to bottom re-posts the queue and deletes the old me
   assert.ok(!m.queues.has('qmsg'));
   assert.match(body(w.posted[0]), new RegExp(`<@${U(2)}>`));
   assert.match(last(bump, 'editReply').content, /moved to the bottom/);
+});
+
+test('season reset: admin-only, confirm step, archives standings and clears results but keeps links', async () => {
+  reset();
+  db.users[U(1)] = { puuid: 'P1', region: 'euw', name: 'a', tag: 'b', roles: ['mid'], w: 3, l: 1, adj: 40, hist: ['W'] };
+  db.users[U(2)] = { override: 900, w: 1, l: 3, adj: -30 };
+  const no = mk('cmd', { user: U(1), reset: true, over: { commandName: 'leaderboard' } });
+  await m.handle(no);
+  assert.match(last(no, 'reply').content, /Manage Server/);
+  const ask = mk('cmd', { user: U(1), admin: true, reset: true, over: { commandName: 'leaderboard' } });
+  await m.handle(ask);
+  assert.match(last(ask, 'reply').content, /\*\*2\*\* players/);
+  assert.equal(db.users[U(1)].w, 3, 'nothing cleared before confirming');
+  const sneaky = mk('comp', { customId: 'lb:reset', user: U(2) }); await m.handle(sneaky);
+  assert.equal(db.users[U(1)].w, 3);
+  const yes = mk('comp', { customId: 'lb:reset', user: U(1), admin: true }); await m.handle(yes);
+  assert.match(last(yes, 'update').content, /New season/);
+  assert.equal(db.seasons.at(-1).standings.length, 2);
+  assert.equal(db.seasons.at(-1).standings[0].id, U(1));
+  assert.ok(!db.users[U(1)].w && !db.users[U(1)].adj && !db.users[U(1)].hist);
+  assert.equal(db.users[U(1)].puuid, 'P1');
+  assert.deepEqual(db.users[U(1)].roles, ['mid']);
+  assert.equal(db.users[U(2)].override, 900);
+  assert.match(m.boardEmbed().toJSON().description, /No results yet/);
 });

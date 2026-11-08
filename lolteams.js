@@ -564,7 +564,8 @@ const commands = [
     .addIntegerOption((o) => o.setName('test').setDescription('Practice lobby with fake players, no voice channel needed (needs Manage Server)')
       .setMinValue(2).setMaxValue(10)),
   new SlashCommandBuilder().setName('queue').setDescription('Open a queue in this channel that anyone can join'),
-  new SlashCommandBuilder().setName('leaderboard').setDescription('Post the in-house leaderboard in this channel'),
+  new SlashCommandBuilder().setName('leaderboard').setDescription('Post the in-house leaderboard in this channel')
+    .addBooleanOption((o) => o.setName('reset').setDescription('Start a new season: archive and clear all in-house results (needs Manage Server)')),
 ];
 const isAdmin = (i) => !!i.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
 const canEdit = (i, tid) => i.user.id === tid || isAdmin(i);
@@ -575,7 +576,14 @@ const sessions = new Map(); // public teams message id -> { vcId, res, moved, dr
 
 async function onCommand(i) {
   if (i.commandName === 'queue') return openQueue(i);
-  if (i.commandName === 'leaderboard') return i.reply({ embeds: [boardEmbed()], files: LB_BANNER });
+  if (i.commandName === 'leaderboard') {
+    if (!i.options.getBoolean?.('reset')) return i.reply({ embeds: [boardEmbed()], files: LB_BANNER });
+    if (!isAdmin(i)) return i.reply({ content: 'Starting a new season needs Manage Server.', flags: EPH });
+    const n = Object.values(db.users).filter((u) => u.w || u.l).length;
+    return i.reply({ flags: EPH, content: `Start a new season? This clears in-house W/L, rating adjustments and form for **${n}** player${n === 1 ? '' : 's'}. ` +
+      'The current standings are archived in the data file first. Riot links, roles and duos are kept.',
+      components: [rowOf(btn('lb:reset', 'Start new season', ButtonStyle.Danger))] });
+  }
   const tid = i.options.getUser('user')?.id ?? i.user.id;
   if (!canEdit(i, tid)) return i.reply(NOPE);
   const n = i.options.getInteger('test');
@@ -977,6 +985,21 @@ async function onHost(i) {
   }
 }
 
+// new season: archive the standings, then clear in-house results (Riot links, roles, duos stay)
+function seasonReset() {
+  const standings = Object.entries(db.users).filter(([, u]) => u.w || u.l)
+    .map(([id, u]) => ({ id, w: u.w || 0, l: u.l || 0, adj: u.adj || 0 })).sort((a, b) => b.adj - a.adj);
+  (db.seasons ||= []).push({ ended: Date.now(), standings });
+  for (const u of Object.values(db.users)) { delete u.w; delete u.l; delete u.adj; delete u.hist; }
+  save();
+  return standings.length;
+}
+async function onSeasonReset(i) {
+  if (!isAdmin(i)) return i.reply({ content: 'Starting a new season needs Manage Server.', flags: EPH });
+  const n = seasonReset();
+  return i.update({ content: `✅ New season started. ${n} player${n === 1 ? '' : 's'} archived (season ${db.seasons.length}).`, components: [] });
+}
+
 // ── live state: queues + teams messages survive restarts (kept in the db file) ──
 let liveSnap = '';
 function persistLive() {
@@ -1001,7 +1024,8 @@ async function handle(i) {
     else if (i.isModalSubmit()) await onModal(i);
     else if (i.isMessageComponent()) {
       const c = i.customId;
-      await (c.startsWith('lol:') ? onPanel(i) : c.startsWith('q:') ? onQueue(i) : c.startsWith('qh:') ? onHost(i) : onTeamButton(i));
+      await (c.startsWith('lol:') ? onPanel(i) : c.startsWith('q:') ? onQueue(i) : c.startsWith('qh:') ? onHost(i)
+        : c === 'lb:reset' ? onSeasonReset(i) : onTeamButton(i));
     }
   } catch (e) {
     if (e.code === 10062) { // reply window missed, or another running copy of the bot answered first
@@ -1049,5 +1073,5 @@ if (require.main === module) start();
 module.exports = {
   parseRiotId, parseRank, ratingLabel, toRating, pickSplit, toUnits, assignRoles, makeTeams, buildPlayers, compose,
   startDraft, draftPick, draftCaptain, pickTeam, applyResult, undoResult, boardEmbed, getRank, balance, fakePlayers, testLobbies,
-  teamVcs, queues, renderQueue, persistLive, restoreLive, panel, loadCrests, crests, rankIcon, renderTeams, renderDraft, linkModal, rankModal, handle, db, sessions,
+  teamVcs, queues, renderQueue, persistLive, restoreLive, seasonReset, panel, loadCrests, crests, rankIcon, renderTeams, renderDraft, linkModal, rankModal, handle, db, sessions,
 };

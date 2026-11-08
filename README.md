@@ -9,6 +9,7 @@ Discord bot for League of Legends custom games. Members link their Riot account,
 | `/lol` | Your private profile panel: link account, roles, duo, manual rank, **Make teams** from your voice channel |
 | `/leaderboard` | Post the in-house leaderboard in the channel |
 | `/lol test:8` | Practice lobby with fake players (Manage Server) |
+| `/leaderboard reset:true` | New season: archive the standings, then clear in-house results (Manage Server, asks to confirm). Links, roles and duos stay. |
 
 ## Queue
 `/queue` posts a sign-up message that stays up. People press **Join queue** or **Leave** whenever they like. The message shows each player's rank and main role, the role mix and the average rank.
