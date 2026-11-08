@@ -413,8 +413,7 @@ function renderTeams(s, canMove) {
   const head = new EmbedBuilder().setColor(BLURPLE).setDescription(lines.join('\n'))
     .setTitle((s.test ? '🧪 ' : '') + (rep ? `Teams · ${rep.winner ? '🔴 Red' : '🔵 Blue'} won` : s.drafted ? 'Teams · captain draft' : 'Teams'));
   head.addFields(...teamFields(s, 0), ...teamFields(s, 1));
-  const files = [];
-  if (fs.existsSync(BANNER)) { head.setImage('attachment://banner.png'); files.push(new AttachmentBuilder(BANNER, { name: 'banner.png' })); }
+  const files = withBanner(head);
   const embeds = [head];
   const off = res.teams.flat().some((p) => offRole(p));
   const foot = [res.flagged && `* counted as ${ratingLabel(DEFAULT_RATING)}`, off && '↻ off-role'].filter(Boolean);
@@ -429,6 +428,13 @@ function renderTeams(s, canMove) {
   return { embeds, files, components: [top, rowOf(btn('win0', '🔵 Blue won', ButtonStyle.Secondary), btn('win1', '🔴 Red won', ButtonStyle.Secondary))] };
 }
 
+// puts the banner image on an embed; returns the files to send with it (an edit with these replaces the old attachments)
+function withBanner(e) {
+  if (!fs.existsSync(BANNER)) return [];
+  e.setImage('attachment://banner.png');
+  return [new AttachmentBuilder(BANNER, { name: 'banner.png' })];
+}
+
 function renderDraft(s) {
   const d = s.draft, c = draftCaptain(d), turn = pickTeam(d.j);
   const head = new EmbedBuilder().setColor(turn ? RED : BLUE).setTitle(`${s.test ? '🧪 ' : ''}Captain draft`)
@@ -437,12 +443,13 @@ function renderDraft(s) {
     { name: `${n ? '🔴 Red' : '🔵 Blue'} Team`, value: (() => { const a = d.teams[n].reduce((x, p) => x + p.rating, 0) / d.teams[n].length; return `${rankIcon(a)} ${ratingLabel(a)} avg · ${d.teams[n].length} player${d.teams[n].length === 1 ? '' : 's'}`; })() },
     { name: 'Player', value: d.teams[n].map((p, i) => `${i ? `\`${i + 1}\`` : '👑'} ${who(p)}`).join('\n'), inline: true },
     { name: 'Rank', value: d.teams[n].map((p) => `${p.icon} ${short(p.label)}`).join('\n'), inline: true }];
-  head.addFields(...card(0), ...card(1), { name: `Available · ${d.pool.length}`,
-    value: d.pool.map((p) => `${p.icon} ${who(p)} · ${short(p.label)} · ${p.roles?.[0] ? ROLE_ICON[p.roles[0]] : 'Fill'}`).join('\n') || ZW });
+  const avail = (withRole) => d.pool.map((p) => `${p.icon} ${who(p)} · ${short(p.label)}` + (withRole ? ` · ${p.roles?.[0] ? ROLE_ICON[p.roles[0]] : 'Fill'}` : '')).join('\n');
+  const pool = avail(true).length <= 1024 ? avail(true) : avail(false); // field values max out at 1024 chars
+  head.addFields(...card(0), ...card(1), { name: `Available · ${d.pool.length}`, value: pool || ZW });
   const menu = new StringSelectMenuBuilder().setCustomId('pick').setPlaceholder(`${turn ? '🔴' : '🔵'} Pick a player`)
     .addOptions(d.pool.map((p) => new StringSelectMenuOptionBuilder()
       .setLabel((d.names[p.id] || p.id).slice(0, 100)).setDescription(p.label.replace('*', '')).setValue(p.id).setEmoji(emojiOf(p.icon))));
-  return { embeds: [head], components: [rowOf(menu), rowOf(btn('cancel', 'Cancel draft', ButtonStyle.Secondary))] };
+  return { embeds: [head], files: withBanner(head), components: [rowOf(menu), rowOf(btn('cancel', 'Cancel draft', ButtonStyle.Secondary))] };
 }
 
 // ── rendering: leaderboard + personal panel ──────────────────────────────
@@ -812,8 +819,7 @@ async function renderQueue(q, closedNote) {
   const byId = new Map((await buildPlayers(q.ids)).map((p) => [p.id, p]));
   const ps = q.ids.map((id) => byId.get(id));
   const e = new EmbedBuilder().setColor(GOLD).setTitle('Custom game queue');
-  const files = [];
-  if (fs.existsSync(BANNER)) { e.setImage('attachment://banner.png'); files.push(new AttachmentBuilder(BANNER, { name: 'banner.png' })); }
+  const files = withBanner(e);
   if (closedNote) return { embeds: [e.setDescription(closedNote).setFooter({ text: 'Queue closed' })], files, components: [] };
 
   const n = ps.length, left = QMAX - n;

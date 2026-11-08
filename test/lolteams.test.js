@@ -1035,3 +1035,17 @@ test('balancing prefers splits where roles fit: two top-only players never share
     assert.ok(res.teams.flat().every((p) => p.role === p.roles[0]), 'everyone on their main');
   }
 });
+
+test('draft with 10 real players and long emoji codes stays within embed limits', () => {
+  for (const t of ['iron', 'bronze', 'silver', 'gold', 'platinum', 'emerald', 'diamond', 'master', 'unranked', 'role_top', 'role_jungle', 'role_mid', 'role_bot', 'role_support'])
+    m.crests[t] = `<:lol_${t}:123456789012345678>`;
+  try {
+    const R = ['support', 'jungle', 'top', 'mid', 'bot'];
+    const ps = Array.from({ length: 10 }, (_, k) => ({ id: String(100000000000000000n + BigInt(k)), rating: 1600 + k, label: 'Platinum III (flex)*', icon: m.rankIcon(1600), roles: [R[k % 5]], linked: true }));
+    const s = { draft: m.startDraft(ps, Object.fromEntries(ps.map((p) => [p.id, 'A very long display name'.repeat(2)]))) };
+    const out = m.renderDraft(s);
+    const e = out.embeds[0].toJSON();
+    for (const f of e.fields) assert.ok(f.value.length <= 1024, `${f.name}: ${f.value.length}`);
+    out.components.forEach((r) => r.toJSON());
+  } finally { for (const t of Object.keys(m.crests)) delete m.crests[t]; }
+});
