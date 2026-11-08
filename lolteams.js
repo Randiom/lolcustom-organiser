@@ -383,7 +383,7 @@ const ZW = '\u200b';
 function teamFields(s, n) {
   const { res, report: rep } = s, t = res.teams[n];
   return [
-    { name: `${rep?.winner === n ? '🏆' : n ? '🔴' : '🔵'} ${n ? 'Red' : 'Blue'} Team · ${ratingLabel(res.avg[n])} avg`, value: ZW },
+    { name: `${rep?.winner === n ? '🏆' : n ? '🔴' : '🔵'} ${n ? 'Red' : 'Blue'} Team`, value: `${rankIcon(res.avg[n])} ${ratingLabel(res.avg[n])} avg` },
     { name: 'Role', value: t.map((p) => `${ROLE_ICON[p.role]} **${cap(p.role)}**`).join('\n'), inline: true },
     { name: 'Player', value: t.map((p) => who(p)).join('\n'), inline: true },
     { name: 'Rank', value: t.map((p) => `${p.icon} ${p.label}`).join('\n'), inline: true },

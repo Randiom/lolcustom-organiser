@@ -418,8 +418,9 @@ test('teams view: one embed with header, two team sections of Role | Player | Ra
   assert.equal(out.embeds.length, 1);
   const e = out.embeds[0].toJSON();
   assert.match(e.description, /Even match|Close|Uneven/);
-  assert.match(e.fields[0].name, /^🔵 Blue Team · .+ avg/);
-  assert.match(e.fields[4].name, /^🔴 Red Team · .+ avg/);
+  assert.match(e.fields[0].name, /^🔵 Blue Team$/);
+  assert.match(e.fields[4].name, /^🔴 Red Team$/);
+  assert.match(e.fields[0].value, / avg$/);
   for (const o of [1, 5]) {
     assert.deepEqual(e.fields.slice(o, o + 3).map((f) => f.name), ['Role', 'Player', 'Rank']);
     assert.ok(e.fields.slice(o, o + 3).every((f) => f.inline && f.value.split('\n').length === 5)); // one line per player so rows align
