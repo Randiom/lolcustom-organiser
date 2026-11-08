@@ -976,3 +976,39 @@ test('leaderboard shows your own position below the top 10; panel shows your ran
   assert.match(String(p.files[0].attachment), /icons\/(gold|silver|platinum)\.png$/);
   assert.equal(m.panel(U(99)).files.length, 0, 'no crest before linking');
 });
+
+test('live state: queues and teams messages survive a restart', async () => {
+  const { q, qpress, list } = await openQ();
+  await m.handle(qpress('q:join', list[0]));
+  q.ids = list.slice(0, 4);
+  await m.handle(qpress('q:start', list[0]));
+  await m.handle(qpress('q:join', list[5]));
+  const sess = JSON.stringify(m.sessions.get('msg1').res.teams);
+  const onDisk = JSON.parse(fs.readFileSync(process.env.DB_FILE, 'utf8'));
+  assert.deepEqual(Object.keys(onDisk.live.queues), ['qmsg']);
+  assert.deepEqual(onDisk.live.queues.qmsg.ids, [list[5]]);
+  m.queues.clear(); m.sessions.clear();
+  m.db.live = onDisk.live; m.restoreLive();
+  assert.deepEqual(m.queues.get('qmsg').ids, [list[5]]);
+  assert.equal(JSON.stringify(m.sessions.get('msg1').res.teams), sess);
+  // stale entries are dropped
+  m.queues.clear(); m.sessions.clear();
+  m.db.live = { queues: { old: { t: 0, ids: [] } }, sessions: { olds: { t: 0 } } }; m.restoreLive();
+  assert.equal(m.queues.size + m.sessions.size, 0);
+});
+
+test('queue: a deleted queue message frees the channel; overlapping joins all show up', async () => {
+  const { w, q, qpress, list } = await openQ();
+  q.channelId = 'c1';
+  const ch = { ...w.channel, messages: { fetch: async () => { const e = new Error('Unknown Message'); e.code = 10008; throw e; } } };
+  const again = mk('cmd', { user: U(2), guild: w.guild, channel: ch, over: { commandName: 'queue' } });
+  await m.handle(again);
+  assert.ok(!last(again, 'reply'), 'no "already a queue" reply');
+  assert.ok(last(again, 'editReply'), 'new queue posted');
+  // three joins at once
+  assert.ok(m.queues.get('x') && !m.queues.get('qmsg'));
+  const presses = list.slice(0, 3).map((u) => qpress('q:join', u, { message: { id: 'x' } }));
+  await Promise.all(presses.map((x) => m.handle(x)));
+  const final = last(presses[2], 'editReply');
+  for (const u of list.slice(0, 3)) assert.match(body(final), new RegExp(`<@${u}>`));
+});

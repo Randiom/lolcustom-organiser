@@ -38,7 +38,7 @@ Run `/lol test:8` (needs Manage Server) to fill a lobby with you plus 7 fake pla
 ## Rank icons
 The real crests ship in `icons/` (128px, from the wiki). On startup the bot uploads the rank crests (Iron … Diamond, Master+, Unranked) and the five role icons as application emojis and uses them next to every rank. Source per tier: `icons/<tier>.png`, otherwise the URL in `ICON_URL`. Emojis are only uploaded once. If a crest can't be loaded, that tier falls back to a coloured emoji. Check the console for `Rank crests loaded: 14/14`.
 
-Teams messages stay interactive for 12 hours (or until the bot restarts).
+Queues and teams messages survive bot restarts (they are saved in `DB_FILE`). Teams messages stay interactive for 12 hours after their last use, queues for a week.
 
 ## Tests
 `npm test` runs a suite with a mocked Riot API and fake Discord interactions. It needs no tokens.

@@ -25,7 +25,8 @@ const DEFAULT_RATING = +process.env.DEFAULT_RATING || 1000;    // unranked / unl
 const TOLERANCE = +process.env.TOLERANCE || 20;                // avg-rating slack for random split choice
 const ELO_K = 24;                                              // in-house rating swing per reported game
 const ADJ_MAX = 300;                                           // in-house adjustment is clamped to ±this
-const SESSION_TTL = 12 * 3600e3;                               // teams message stays interactive this long (memory only)
+const SESSION_TTL = 12 * 3600e3;                               // teams message stays interactive this long after its last use
+const QUEUE_TTL = 7 * 24 * 3600e3;                             // an untouched queue expires after a week
 const EPH = MessageFlags.Ephemeral;
 
 // region -> [platform host, regional host]
@@ -824,8 +825,12 @@ async function renderQueue(q, closedNote) {
 }
 
 async function openQueue(i) {
-  const open = [...queues.values()].find((q) => q.channelId === i.channelId);
-  if (open) return i.reply({ content: `There's already a queue in this channel: ${open.url}`, flags: EPH });
+  const open = [...queues].find(([, q]) => q.channelId === i.channelId);
+  if (open) { // still there? (someone may have deleted the message)
+    const alive = i.channel?.messages ? await i.channel.messages.fetch(open[0]).then(() => true, (e) => e.code !== 10008) : true;
+    if (alive) return i.reply({ content: `There's already a queue in this channel: ${open[1].url}`, flags: EPH });
+    queues.delete(open[0]);
+  }
   await i.deferReply();
   const q = { host: i.user.id, channelId: i.channelId, ids: [], t: Date.now(), games: 0 };
   const msg = await i.editReply(await renderQueue(q));
@@ -849,6 +854,19 @@ async function popQueue(i, q) {
   } finally { q.popping = false; }
 }
 
+// joins/leaves can overlap while ranks load; edits go out one at a time and always show the latest list
+const queueEdits = new Map();
+function editQueue(i, q) {
+  const key = i.message.id;
+  const run = (queueEdits.get(key) || Promise.resolve()).then(async () => {
+    let snap, payload;
+    do { snap = q.ids.join(); payload = await renderQueue(q); } while (snap !== q.ids.join());
+    return i.editReply(payload);
+  });
+  queueEdits.set(key, run.catch(() => {}));
+  return run;
+}
+
 async function onQueue(i) {
   const q = queues.get(i.message.id);
   if (!q) return i.reply({ content: 'This queue has expired. Open a new one with /queue.', flags: EPH });
@@ -867,7 +885,7 @@ async function onQueue(i) {
     if (!u?.puuid && u?.override == null)
       i.followUp({ content: 'You joined. Press **My profile** to link your Riot account so teams are balanced by your rank.', flags: EPH }).catch(() => {});
     if (q.ids.length >= QMAX) await popQueue(i, q);
-    return i.editReply(await renderQueue(q));
+    return editQueue(i, q);
   }
   if (id === 'q:leave') {
     if (!inQ) return no('You are not in the queue.');
@@ -881,10 +899,26 @@ async function onQueue(i) {
     if (q.ids.length < 2) return no('Need at least 2 players.');
     await i.deferUpdate();
     await popQueue(i, q);
-    return i.editReply(await renderQueue(q));
+    return editQueue(i, q);
   }
   await i.deferUpdate();
-  return i.editReply(await renderQueue(q));
+  return editQueue(i, q);
+}
+
+// ── live state: queues + teams messages survive restarts (kept in the db file) ──
+let liveSnap = '';
+function persistLive() {
+  const keep = (m, ttl) => Object.fromEntries([...m].filter(([, v]) => Date.now() - v.t < ttl));
+  const live = { queues: keep(queues, QUEUE_TTL), sessions: keep(sessions, SESSION_TTL) };
+  const snap = JSON.stringify(live);
+  if (snap === liveSnap) return;
+  liveSnap = snap; db.live = live; save();
+}
+function restoreLive() {
+  const now = Date.now();
+  for (const [k, q] of Object.entries(db.live?.queues || {})) if (now - q.t < QUEUE_TTL) queues.set(k, { ...q, popping: false });
+  for (const [k, s] of Object.entries(db.live?.sessions || {})) if (now - s.t < SESSION_TTL) sessions.set(k, s);
+  liveSnap = JSON.stringify(db.live || {});
 }
 
 // ── dispatch ─────────────────────────────────────────────────────────────
@@ -904,6 +938,8 @@ async function handle(i) {
     const content = `Error: ${riotErr(e)}`;
     const send = i.deferred || i.replied ? i.followUp({ content, flags: EPH }) : i.reply({ content, flags: EPH });
     send.catch(() => {});
+  } finally {
+    try { persistLive(); } catch (e) { console.error('saving live state failed:', e.message); }
   }
 }
 
@@ -925,8 +961,12 @@ function start() {
 
   client.on(Events.InteractionCreate, handle);
 
-  setInterval(() => { for (const [id, s] of sessions) if (Date.now() - s.t > SESSION_TTL) sessions.delete(id);
-    for (const [id, q] of queues) if (Date.now() - q.t > SESSION_TTL) queues.delete(id); }, 600e3);
+  restoreLive();
+  if (queues.size || sessions.size) console.log(`Restored ${queues.size} queue(s) and ${sessions.size} teams message(s)`);
+  setInterval(() => {
+    for (const [id, s] of sessions) if (Date.now() - s.t > SESSION_TTL) sessions.delete(id);
+    for (const [id, q] of queues) if (Date.now() - q.t > QUEUE_TTL) queues.delete(id);
+  }, 600e3);
   client.login(DISCORD_TOKEN);
 }
 
@@ -934,5 +974,5 @@ if (require.main === module) start();
 module.exports = {
   parseRiotId, parseRank, ratingLabel, toRating, pickSplit, toUnits, assignRoles, makeTeams, buildPlayers, compose,
   startDraft, draftPick, draftCaptain, pickTeam, applyResult, undoResult, boardEmbed, getRank, balance, fakePlayers, testLobbies,
-  teamVcs, queues, renderQueue, panel, loadCrests, crests, rankIcon, renderTeams, renderDraft, linkModal, rankModal, handle, db, sessions,
+  teamVcs, queues, renderQueue, persistLive, restoreLive, panel, loadCrests, crests, rankIcon, renderTeams, renderDraft, linkModal, rankModal, handle, db, sessions,
 };
