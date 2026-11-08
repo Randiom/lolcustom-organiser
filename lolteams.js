@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // lolteams.js — Discord bot for League of Legends custom games: link Riot accounts, rank-balanced teams,
 // captain drafts, duo partners, win/loss tracking with an in-house leaderboard.
-// One slash command (/lol) opens a personal (ephemeral) panel; teams are posted in the channel with buttons.
+// /lol opens a personal (ephemeral) panel, /queue posts a standing queue, /leaderboard posts the board; teams are posted with buttons.
 // Setup: npm i discord.js   (Node 20.12+)
 // Run:   DISCORD_TOKEN=... RIOT_KEY=... [GUILD_ID=...]  (or put them in a .env file) [DEFAULT_REGION=euw] [TEAM1_VC=...] [TEAM2_VC=...] node lolteams.js
-// Bot invite scopes: bot + applications.commands. Permissions: View Channel, Send Messages, Embed Links, Connect, Move Members.
+// Bot invite scopes: bot + applications.commands. Permissions: View Channel, Send Messages, Embed Links, Attach Files, Connect, Move Members.
 // "Move to team channels" works out of the box if the server has voice channels with "blue" and "red" in their names
 // (or set TEAM1_VC / TEAM2_VC channel IDs).
 'use strict';
@@ -630,7 +630,7 @@ async function postTeams(i, tid, s, label) {
     return i.editReply(panel(tid, `✅ [${label} posted](${msg.url}).`));
   } catch (e) {
     console.error(e);
-    return i.editReply(panel(tid, '⚠ Couldn\'t post in this channel. The bot needs Send Messages and Embed Links here.'));
+    return i.editReply(panel(tid, '⚠ Couldn\'t post in this channel. The bot needs Send Messages, Embed Links and Attach Files here.'));
   }
 }
 
