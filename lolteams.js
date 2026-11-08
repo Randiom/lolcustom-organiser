@@ -12,7 +12,8 @@ try { process.loadEnvFile(); } catch {} // optional .env file (Node 20.12+)
 const fs = require('fs');
 const {
   Client, Events, GatewayIntentBits, MessageFlags, ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  EmbedBuilder, AttachmentBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder,
+  AttachmentBuilder, ModalBuilder, ContainerBuilder, TextDisplayBuilder, SeparatorBuilder, SeparatorSpacingSize,
+  MediaGalleryBuilder, MediaGalleryItemBuilder, SectionBuilder, ThumbnailBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder, UserSelectMenuBuilder, PermissionFlagsBits, SlashCommandBuilder,
 } = require('discord.js');
 
@@ -393,89 +394,108 @@ const short = (label) => label.replace(/ \d+LP/, ''); // 'Gold II 61LP' -> 'Gold
 const offRole = (p) => (!p.roles?.length || p.roles[0] === p.role ? '' : p.roles.includes(p.role) ? '' : ' ↻');
 
 const ZW = '\u200b';
-// One team as embed fields: a full-width title row, then Role | Player | Rank columns
-function teamFields(s, n) {
+// ── layout kit (Discord "components v2": one rounded box with a banner, headings, dividers and buttons inside) ──
+const V2 = MessageFlags.IsComponentsV2;
+const text = (s) => new TextDisplayBuilder().setContent(s);
+const divider = (big = false) => new SeparatorBuilder().setSpacing(big ? SeparatorSpacingSize.Large : SeparatorSpacingSize.Small).setDivider(true);
+// a box with an accent colour and (if the file exists) a banner on top; returns the box and the files to send with it
+function box(color, file = BANNER, name = 'banner.png') {
+  const c = new ContainerBuilder().setAccentColor(color);
+  const files = [];
+  if (file && fs.existsSync(file)) {
+    c.addMediaGalleryComponents(new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(`attachment://${name}`)));
+    files.push(new AttachmentBuilder(file, { name }));
+  }
+  return { c, files };
+}
+// editing an older embed-style message into this layout requires clearing its text and embeds
+const edm = (msg, p) => (msg?.flags?.has?.(V2) ? p : { ...p, content: null, embeds: [] });
+const ed = (i, p) => edm(i.message, p);
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+// ── rendering: public teams message ──────────────────────────────────────
+function teamText(s, n) {
   const { res, report: rep } = s, t = res.teams[n];
-  return [
-    { name: `${rep?.winner === n ? '🏆' : n ? '🔴' : '🔵'} ${n ? 'Red' : 'Blue'} Team`, value: `${rankIcon(res.avg[n])} ${ratingLabel(res.avg[n])} avg` },
-    { name: 'Role', value: t.map((p) => `${ROLE_ICON[p.role]} **${cap(p.role)}**${offRole(p)}`).join('\n'), inline: true },
-    { name: 'Player', value: t.map((p) => who(p)).join('\n'), inline: true },
-    { name: rep ? 'Rank · in-house' : 'Rank', value: t.map((p) => `${p.icon} ${rep ? short(p.label) : p.label}` + (rep ? ` **${signed(rep.deltas[p.id] ?? 0)}**` : '')).join('\n'), inline: true },
-  ];
+  const head = `### ${rep?.winner === n ? '🏆' : n ? '🔴' : '🔵'} ${n ? 'Red' : 'Blue'} Team  ·  ${rankIcon(res.avg[n])} ${ratingLabel(res.avg[n])} avg`;
+  const rows = t.map((p) => `${ROLE_ICON[p.role]} **${cap(p.role)}**${offRole(p)} · ${who(p)} · ${p.icon} ${short(p.label)}` +
+    (rep ? ` **${signed(rep.deltas[p.id] ?? 0)}**` : ''));
+  return text([head, ...rows].join('\n'));
 }
 
 function renderTeams(s, canMove) {
   const { res, report: rep } = s;
-  const lines = [rep ? `🏆 **${rep.winner ? 'Red' : 'Blue'} won!** Winners ${signed(rep.d)}, losers ${signed(-rep.d)} in-house rating${rep.dry ? ' (practice, not saved)' : ''}.` : balanceLine(res)];
-  if (res.unlinked.length) {
-    const mentions = res.unlinked.map((id) => `<@${id}>`).join(' ');
-    lines.push(`⚠️ ${mentions} ${res.unlinked.length > 1 ? "haven't" : "hasn't"} linked an account. Use /lol to link.`);
-  }
+  const { c, files } = box(rep ? (rep.winner ? RED : BLUE) : GOLD);
+  const title = `## ${s.test ? '🧪 ' : ''}${s.game ? `Game ${s.game}` : 'Teams'}` +
+    (rep ? ` · ${rep.winner ? '🔴 Red' : '🔵 Blue'} won` : s.drafted ? ' · captain draft' : '');
+  const lines = [title, rep
+    ? `🏆 **${rep.winner ? 'Red' : 'Blue'} won!** Winners ${signed(rep.d)}, losers ${signed(-rep.d)} in-house rating${rep.dry ? ' (practice, not saved)' : ''}.`
+    : balanceLine(res)];
+  if (res.unlinked.length)
+    lines.push(`⚠️ ${res.unlinked.map((id) => `<@${id}>`).join(' ')} ${res.unlinked.length > 1 ? "haven't" : "hasn't"} linked an account. Use /lol to link.`);
   if (res.duoIgnored) lines.push('⚠️ Duo partners couldn\'t be kept together with this player count.');
-  const head = new EmbedBuilder().setColor(BLURPLE).setDescription(lines.join('\n'))
-    .setTitle((s.test ? '🧪 ' : '') + (s.game ? `Game ${s.game}` : 'Teams') + (rep ? ` · ${rep.winner ? '🔴 Red' : '🔵 Blue'} won` : s.drafted ? ' · captain draft' : ''));
-  head.addFields(...teamFields(s, 0), ...teamFields(s, 1));
-  const files = withBanner(head);
-  const embeds = [head];
+  if (s.next) lines.push(`➡️ [Next game](${s.next})`);
+  c.addTextDisplayComponents(text(lines.join('\n')));
+  c.addSeparatorComponents(divider()).addTextDisplayComponents(teamText(s, 0));
+  c.addSeparatorComponents(divider()).addTextDisplayComponents(teamText(s, 1));
   const off = res.teams.flat().some((p) => offRole(p));
   const foot = [res.flagged && `* counted as ${ratingLabel(DEFAULT_RATING)}`, off && '↻ off-role'].filter(Boolean);
-  if (foot.length) head.setFooter({ text: foot.join(' · ') });
-
-  if (s.next) lines.push(`➡️ [Next game](${s.next})`);
-  head.setDescription(lines.join('\n'));
-  if (rep) return { embeds, files, components: [rowOf(...(s.next ? [] : [btn('again', 'Play again', ButtonStyle.Success)]), btn('undo', 'Undo result', ButtonStyle.Secondary))] };
-  const top = s.moved ? rowOf(btn('back', 'Move everyone back', ButtonStyle.Primary))
-    : rowOf(btn('reroll', 'Reroll', ButtonStyle.Primary), btn('draft', 'Captain draft', ButtonStyle.Secondary),
-      ...(canMove ? [btn('move', 'Move to team channels', ButtonStyle.Secondary)] : []));
-  return { embeds, files, components: [top, rowOf(btn('win0', '🔵 Blue won', ButtonStyle.Secondary), btn('win1', '🔴 Red won', ButtonStyle.Secondary))] };
-}
-
-// puts the banner image on an embed; returns the files to send with it (an edit with these replaces the old attachments)
-function withBanner(e) {
-  if (!fs.existsSync(BANNER)) return [];
-  e.setImage('attachment://banner.png');
-  return [new AttachmentBuilder(BANNER, { name: 'banner.png' })];
+  if (foot.length) c.addTextDisplayComponents(text(`-# ${foot.join(' · ')}`));
+  c.addSeparatorComponents(divider());
+  if (rep) c.addActionRowComponents(rowOf(...(s.next ? [] : [btn('again', 'Play again', ButtonStyle.Success)]), btn('undo', 'Undo result', ButtonStyle.Secondary)));
+  else c.addActionRowComponents(
+    s.moved ? rowOf(btn('back', 'Move everyone back', ButtonStyle.Primary))
+      : rowOf(btn('reroll', 'Reroll', ButtonStyle.Primary), btn('draft', 'Captain draft', ButtonStyle.Secondary),
+        ...(canMove ? [btn('move', 'Move to team channels', ButtonStyle.Secondary)] : [])),
+    rowOf(btn('win0', '🔵 Blue won', ButtonStyle.Secondary), btn('win1', '🔴 Red won', ButtonStyle.Secondary)));
+  return { components: s.ping ? [text(s.ping), c] : [c], files, flags: V2 };
 }
 
 function renderDraft(s) {
-  const d = s.draft, c = draftCaptain(d), turn = pickTeam(d.j);
-  const head = new EmbedBuilder().setColor(turn ? RED : BLUE).setTitle(`${s.test ? '🧪 ' : ''}Captain draft`)
-    .setDescription(`${turn ? '🔴' : '🔵'} ${who(c)} **picks next** · ${d.pool.length} player${d.pool.length === 1 ? '' : 's'} left`);
-  const card = (n) => [
-    { name: `${n ? '🔴 Red' : '🔵 Blue'} Team`, value: (() => { const a = d.teams[n].reduce((x, p) => x + p.rating, 0) / d.teams[n].length; return `${rankIcon(a)} ${ratingLabel(a)} avg · ${d.teams[n].length} player${d.teams[n].length === 1 ? '' : 's'}`; })() },
-    { name: 'Player', value: d.teams[n].map((p, i) => `${i ? `\`${i + 1}\`` : '👑'} ${who(p)}`).join('\n'), inline: true },
-    { name: 'Rank', value: d.teams[n].map((p) => `${p.icon} ${short(p.label)}`).join('\n'), inline: true }];
-  const avail = (withRole) => d.pool.map((p) => `${p.icon} ${who(p)} · ${short(p.label)}` + (withRole ? ` · ${p.roles?.[0] ? ROLE_ICON[p.roles[0]] : 'Fill'}` : '')).join('\n');
-  const pool = avail(true).length <= 1024 ? avail(true) : avail(false); // field values max out at 1024 chars
-  head.addFields(...card(0), ...card(1), { name: `Available · ${d.pool.length}`, value: pool || ZW });
+  const d = s.draft, cap0 = draftCaptain(d), turn = pickTeam(d.j);
+  const { c, files } = box(turn ? RED : BLUE);
+  c.addTextDisplayComponents(text(`## ${s.test ? '🧪 ' : ''}Captain draft\n${turn ? '🔴' : '🔵'} ${who(cap0)} **picks next** · ${plural(d.pool.length, 'player')} left`));
+  for (const n of [0, 1]) {
+    const t = d.teams[n], a = t.reduce((x, p) => x + p.rating, 0) / t.length;
+    c.addSeparatorComponents(divider()).addTextDisplayComponents(text([
+      `### ${n ? '🔴 Red' : '🔵 Blue'} Team  ·  ${rankIcon(a)} ${ratingLabel(a)} avg`,
+      ...t.map((p, k) => `${k ? `\`${k + 1}\`` : '👑'} ${who(p)} · ${p.icon} ${short(p.label)}`)].join('\n')));
+  }
+  c.addSeparatorComponents(divider()).addTextDisplayComponents(text([`### Available · ${d.pool.length}`,
+    ...d.pool.map((p) => `${p.icon} ${who(p)} · ${short(p.label)} · ${p.roles?.[0] ? `${ROLE_ICON[p.roles[0]]} ${cap(p.roles[0])}` : '🎲 Fill'}`)].join('\n')));
   const menu = new StringSelectMenuBuilder().setCustomId('pick').setPlaceholder(`${turn ? '🔴' : '🔵'} Pick a player`)
     .addOptions(d.pool.map((p) => new StringSelectMenuOptionBuilder()
       .setLabel((d.names[p.id] || p.id).slice(0, 100)).setDescription(p.label.replace('*', '')).setValue(p.id).setEmoji(emojiOf(p.icon))));
-  return { embeds: [head], files: withBanner(head), components: [rowOf(menu), rowOf(btn('cancel', 'Cancel draft', ButtonStyle.Secondary))] };
+  c.addSeparatorComponents(divider()).addActionRowComponents(rowOf(menu), rowOf(btn('cancel', 'Cancel draft', ButtonStyle.Secondary)));
+  return { components: s.ping ? [text(s.ping), c] : [c], files, flags: V2 };
 }
 
 // ── rendering: leaderboard + personal panel ──────────────────────────────
 const LB_FILE = `${__dirname}/icons/leaderboard.png`;
-const LB_BANNER = fs.existsSync(LB_FILE) ? [new AttachmentBuilder(LB_FILE, { name: 'leaderboard.png' })] : [];
 
 const form = (u, n = 5) => (u.hist || []).slice(-n).map((r) => (r === 'W' ? '🟩' : '🟥')).join('');
 const streak = (u) => { const h = u.hist || []; let k = 0; while (k < h.length && h[h.length - 1 - k] === 'W') k++; return k; };
 const record = (u) => { const g = (u.w || 0) + (u.l || 0); return g ? `${u.w || 0}W ${u.l || 0}L · ${Math.round(((u.w || 0) / g) * 100)}%` : 'No games yet'; };
-function boardEmbed(viewer) {
+function boardRows(viewer) {
   const all = Object.entries(db.users).map(([id, u]) => {
     const base = u.override ?? (u.puuid ? db.ranks[u.puuid]?.rating : null) ?? DEFAULT_RATING;
     return { id, u, adj: u.adj || 0, base, rating: base + (u.adj || 0), g: (u.w || 0) + (u.l || 0) };
   }).filter((r) => r.g > 0).sort((a, b) => b.rating - a.rating || (b.u.w || 0) - (a.u.w || 0));
   const medal = ['🥇', '🥈', '🥉'];
-  const line = (r, i) => `${medal[i] ?? `\`${String(i + 1).padStart(2)}\``} ${rankIcon(r.rating)} <@${r.id}> · ${ratingLabel(r.rating)} · ${record(r.u)}` +
+  const line = (r, i) => `${medal[i] ?? `\`${String(i + 1).padStart(2)}\``} ${rankIcon(r.rating)} <@${r.id}> · **${ratingLabel(r.rating)}** · ${record(r.u)}` +
     (r.adj ? ` · ${signed(r.adj)}` : '') + (streak(r.u) >= 3 ? ` · 🔥${streak(r.u)}` : '');
   const rows = all.slice(0, 10).map(line);
   const me = viewer ? all.findIndex((r) => r.id === viewer) : -1;
   if (me >= 10) rows.push('⋯', line(all[me], me));
-  const e = new EmbedBuilder().setColor(GOLD).setTitle('🏆 In-house leaderboard')
-    .setDescription(rows.length ? rows.join('\n') : 'No results yet. Press 🔵 Blue won or 🔴 Red won on a teams message after a game.')
-    .setFooter({ text: `${all.length} player${all.length === 1 ? '' : 's'} ranked · rating = Riot rank + in-house adjustment` });
-  return LB_BANNER.length ? e.setImage('attachment://leaderboard.png') : e;
+  return { rows, count: all.length };
+}
+// leaderboard; `viewer` adds their own position when they're outside the top 10
+function renderBoard(viewer) {
+  const { rows, count } = boardRows(viewer);
+  const { c, files } = box(GOLD, LB_FILE, 'leaderboard.png');
+  if (!files.length) c.addTextDisplayComponents(text('## 🏆 In-house leaderboard'));
+  c.addTextDisplayComponents(text(rows.length ? rows.join('\n') : 'No results yet. Press 🔵 Blue won or 🔴 Red won on a teams message after a game.'));
+  c.addSeparatorComponents(divider()).addTextDisplayComponents(text(`-# ${plural(count, 'player')} ranked · rating = Riot rank + in-house adjustment`));
+  return { components: [c], files, flags: V2 };
 }
 
 function panel(tid, notice) {
@@ -501,18 +521,22 @@ function panel(tid, notice) {
     : 'Join a voice channel and press Make teams, or use /queue.';
   const testLine = testN && `🧪 Practice lobby: you + ${testN - 1} fake players. Results aren't saved. Run /lol again to leave.`;
 
-  const e = new EmbedBuilder().setTitle('League profile').setColor(GOLD)
-    .setDescription([`<@${tid}>`, testLine, notice].filter(Boolean).join('\n\n'))
-    .addFields(
-      { name: 'Account', value: accountLine, inline: true },
-      { name: 'Rank', value: rankLine, inline: true },
-      { name: 'Roles', value: roleLine, inline: true },
-      { name: 'In-house', value: inhouse, inline: true },
-      { name: 'Duo', value: u.duo ? `<@${u.duo}>` : 'None', inline: true })
-    .setFooter({ text: hint });
+  const c = new ContainerBuilder().setAccentColor(GOLD);
+  const head = [text(`## League profile\n<@${tid}>`), text(linked ? accountLine.replace('\n', ' · ') : 'No Riot account linked yet')];
   const crest = `${__dirname}/icons/${rating == null ? 'unranked' : CREST_TIERS[tierOf(rating)]}.png`;
   const files = [];
-  if ((linked || u.override != null) && fs.existsSync(crest)) { e.setThumbnail('attachment://crest.png'); files.push(new AttachmentBuilder(crest, { name: 'crest.png' })); }
+  if ((linked || u.override != null) && fs.existsSync(crest)) {
+    files.push(new AttachmentBuilder(crest, { name: 'crest.png' }));
+    c.addSectionComponents(new SectionBuilder().addTextDisplayComponents(...head)
+      .setThumbnailAccessory(new ThumbnailBuilder().setURL('attachment://crest.png').setDescription('rank crest')));
+  } else c.addTextDisplayComponents(...head);
+  const flat = (v) => v.replace(/\n-# /g, ' · ').replace(/\n/g, ' · ');
+  c.addSeparatorComponents(divider()).addTextDisplayComponents(text([
+    `**Rank** · ${flat(rankLine)}`,
+    `**Roles** · ${flat(roleLine)}`,
+    `**In-house** · ${flat(inhouse)}`,
+    `**Duo** · ${u.duo ? `<@${u.duo}>` : 'none'}`].join('\n')));
+  if (testLine || notice) c.addSeparatorComponents(divider()).addTextDisplayComponents(text([testLine, notice].filter(Boolean).join('\n')));
 
   // actions first (state-aware emphasis), pickers below
   const link = btn(`lol:link:${tid}`, linked ? 'Change account' : 'Link account', linked ? ButtonStyle.Secondary : ButtonStyle.Primary);
@@ -539,7 +563,8 @@ function panel(tid, notice) {
     .setMinValues(0).setMaxValues(1);
   if (u.duo) duo.setDefaultUsers(u.duo);
   rows.push(rowOf(duo));
-  return { embeds: [e], files, components: rows };
+  c.addSeparatorComponents(divider()).addActionRowComponents(...rows).addTextDisplayComponents(text(`-# ${hint}`));
+  return { components: [c], files, flags: V2 };
 }
 
 function linkModal(tid) {
@@ -577,7 +602,7 @@ const sessions = new Map(); // public teams message id -> { vcId, res, moved, dr
 async function onCommand(i) {
   if (i.commandName === 'queue') return openQueue(i);
   if (i.commandName === 'leaderboard') {
-    if (!i.options.getBoolean?.('reset')) return i.reply({ embeds: [boardEmbed()], files: LB_BANNER });
+    if (!i.options.getBoolean?.('reset')) return i.reply(renderBoard());
     if (!isAdmin(i)) return i.reply({ content: 'Starting a new season needs Manage Server.', flags: EPH });
     const n = Object.values(db.users).filter((u) => u.w || u.l).length;
     return i.reply({ flags: EPH, content: `Start a new season? This clears in-house W/L, rating adjustments and form for **${n}** player${n === 1 ? '' : 's'}. ` +
@@ -592,7 +617,7 @@ async function onCommand(i) {
   await i.deferReply({ flags: EPH });
   const u = db.users[tid]; // keep your own rank current when you open the panel
   if (u?.puuid && Date.now() - (db.ranks[u.puuid]?.at || 0) > FRESH) await getRank(u, true);
-  return i.editReply(panel(tid));
+  return i.editReply(ed(i, panel(tid)));
 }
 
 async function onPanel(i) { // buttons + selects on the ephemeral panel
@@ -604,38 +629,38 @@ async function onPanel(i) { // buttons + selects on the ephemeral panel
     const rec = (db.users[tid] ||= {});
     rec.roles = v === 'fill' ? [] : [v, ...(rec.roles || []).slice(1).filter((r) => r !== v)];
     save();
-    return i.update(panel(tid));
+    return i.update(ed(i, panel(tid)));
   }
   if (act === 'alt') {
     const rec = (db.users[tid] ||= {});
     if (rec.roles?.[0]) { rec.roles = [rec.roles[0], ...i.values]; save(); }
-    return i.update(panel(tid));
+    return i.update(ed(i, panel(tid)));
   }
   if (act === 'duo') {
     const v = i.values[0]; // undefined when cleared
-    if (v && (v === tid || i.users?.get(v)?.bot)) return i.update(panel(tid, '⚠ Pick someone else.'));
+    if (v && (v === tid || i.users?.get(v)?.bot)) return i.update(ed(i, panel(tid, '⚠ Pick someone else.')));
     const rec = (db.users[tid] ||= {});
     if (v) rec.duo = v; else delete rec.duo;
     save();
-    return i.update(panel(tid, v ? `✅ You'll be on the same team as <@${v}> when you're both in the channel.` : '✅ Duo cleared.'));
+    return i.update(ed(i, panel(tid, v ? `✅ You'll be on the same team as <@${v}> when you're both in the channel.` : '✅ Duo cleared.')));
   }
-  if (act === 'board') return i.reply({ embeds: [boardEmbed(tid)], files: LB_BANNER, flags: EPH });
+  if (act === 'board') return i.reply({ ...renderBoard(tid), flags: EPH | V2 });
   if (act === 'link') return i.showModal(linkModal(tid));
   if (act === 'rank') return i.showModal(rankModal(tid));
   if (act === 'unlink') {
     const u = db.users[tid];
     if (u) { delete u.puuid; delete u.region; delete u.name; delete u.tag; save(); }
-    return i.update(panel(tid, '✅ Account unlinked.'));
+    return i.update(ed(i, panel(tid, '✅ Account unlinked.')));
   }
 
   if (act === 'teams') {
     const testN = tid === i.user.id ? testLobbies.get(tid) : undefined;
     if (testN) return startTest(i, tid, testN);
     const vc = i.member?.voice?.channel;
-    if (!vc) return i.update(panel(tid, '⚠ Join a voice channel first.'));
+    if (!vc) return i.update(ed(i, panel(tid, '⚠ Join a voice channel first.')));
     const ids = humans(vc);
-    if (ids.length < 2) return i.update(panel(tid, '⚠ Need at least 2 people in the channel.'));
-    if (ids.length > 10) return i.update(panel(tid, '⚠ Max 10 players.'));
+    if (ids.length < 2) return i.update(ed(i, panel(tid, '⚠ Need at least 2 people in the channel.')));
+    if (ids.length > 10) return i.update(ed(i, panel(tid, '⚠ Max 10 players.')));
     await i.deferUpdate();
     return postTeams(i, tid, { vcId: vc.id, res: await makeTeams(ids), moved: false, t: Date.now() }, 'Teams');
   }
@@ -646,10 +671,10 @@ async function postTeams(i, tid, s, label) {
     const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
     const msg = await ch.send(renderTeams(s, !s.test && !!teamVcs(i.guild)));
     sessions.set(msg.id, s);
-    return i.editReply(panel(tid, `✅ [${label} posted](${msg.url}).`));
+    return i.editReply(ed(i, panel(tid, `✅ [${label} posted](${msg.url}).`)));
   } catch (e) {
     console.error(e);
-    return i.editReply(panel(tid, '⚠ Couldn\'t post in this channel. The bot needs Send Messages, Embed Links and Attach Files here.'));
+    return i.editReply(ed(i, panel(tid, '⚠ Couldn\'t post in this channel. The bot needs Send Messages, Embed Links and Attach Files here.')));
   }
 }
 
@@ -701,7 +726,7 @@ async function onModal(i) {
     console.error(e);
     notice = `⚠ ${riotErr(e)}`;
   }
-  return i.editReply(panel(tid, notice));
+  return i.editReply(ed(i, panel(tid, notice)));
 }
 
 async function onTeamButton(i) { // buttons + the draft menu on the public teams message
@@ -718,7 +743,7 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
     if (s.report) return i.reply({ content: 'Result already reported.', flags: EPH });
     if (s.draft) return i.reply({ content: 'Finish or cancel the draft first.', flags: EPH });
     s.report = applyResult(s.res, id === 'win1' ? 1 : 0, !!s.test);
-    return i.update(renderTeams(s, canMove));
+    return i.update(ed(i, renderTeams(s, canMove)));
   }
   if (id === 'again') { // same players, fresh teams in a new message; this one keeps the result
     if (!mayReport) return i.reply(noReport);
@@ -736,17 +761,17 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
     }
     const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
     const ping = ns.queue ? ns.res.teams.flat().map((p) => p.id) : [];
-    const msg = await ch.send({ ...(ping.length ? { content: `🔔 **Next game!** ${ping.map((x) => `<@${x}>`).join(' ')}`, allowedMentions: { users: ping } } : {}),
-      ...renderTeams(ns, !ns.test && !!vcs) });
+    if (ping.length) ns.ping = `🔔 **Next game!** ${ping.map((x) => `<@${x}>`).join(' ')}`;
+    const msg = await ch.send({ ...renderTeams(ns, !ns.test && !!vcs), ...(ping.length ? { allowedMentions: { users: ping } } : {}) });
     sessions.set(msg.id, ns);
     s.next = msg.url;
-    return i.editReply(renderTeams(s, canMove));
+    return i.editReply(ed(i, renderTeams(s, canMove)));
   }
   if (id === 'undo') {
     if (!mayReport) return i.reply(noReport);
     if (!s.report) return i.reply({ content: 'Nothing to undo.', flags: EPH });
     undoResult(s.report); s.report = null;
-    return i.update(renderTeams(s, canMove));
+    return i.update(ed(i, renderTeams(s, canMove)));
   }
   if (id === 'pick') {
     const d = s.draft;
@@ -754,9 +779,9 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
     const c = draftCaptain(d);
     if (!s.test && i.user.id !== c.id) return i.reply({ content: `Waiting for ${who(c)} to pick.`, flags: EPH }); // practice: you pick for everyone
     if (!draftPick(d, i.values[0])) return i.reply({ content: 'That player was already picked.', flags: EPH });
-    if (d.pool.length) return i.update(renderDraft(s));
+    if (d.pool.length) return i.update(ed(i, renderDraft(s)));
     s.res = compose(d.all, d.teams[0], d.teams[1], ''); s.drafted = true; s.draft = null;
-    return i.update(renderTeams(s, canMove));
+    return i.update(ed(i, renderTeams(s, canMove)));
   }
 
   // everything below needs you to be in the lobby (or a team channel)
@@ -774,7 +799,7 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
       s.res = await makeTeams(ids, s.res.key);
     }
     s.drafted = false; s.draft = null;
-    return i.editReply(renderTeams(s, canMove));
+    return i.editReply(ed(i, renderTeams(s, canMove)));
   }
 
   if (id === 'draft') {
@@ -789,11 +814,11 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
       for (const x of ids) names[x] = vc?.members.get(x)?.displayName || (await i.guild.members.fetch(x).catch(() => null))?.displayName || x;
       s.draft = startDraft(await buildPlayers(ids), names);
     }
-    return i.editReply(renderDraft(s));
+    return i.editReply(ed(i, renderDraft(s)));
   }
   if (id === 'cancel') {
     s.draft = null;
-    return i.update(renderTeams(s, canMove));
+    return i.update(ed(i, renderTeams(s, canMove)));
   }
 
   if (id === 'move' || id === 'back') {
@@ -811,7 +836,7 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
         try { await m.voice.setChannel(to); n++; } catch { failed++; }
       }
     }
-    if (n) { s.moved = !back; await i.message.edit(renderTeams(s, true)); }
+    if (n) { s.moved = !back; await i.message.edit(ed(i, renderTeams(s, true))); }
     return i.editReply(`Moved ${n}` + (failed ? `, ${failed} failed (not in voice / missing Move Members).` : '.'));
   }
 }
@@ -832,28 +857,30 @@ function roleSummary(ps) {
 async function renderQueue(q, closedNote) {
   const byId = new Map((await buildPlayers(q.ids)).map((p) => [p.id, p]));
   const ps = q.ids.map((id) => byId.get(id));
-  const e = new EmbedBuilder().setColor(GOLD).setTitle('Custom game queue');
-  const files = withBanner(e);
-  if (closedNote) return { embeds: [e.setDescription(closedNote).setFooter({ text: 'Queue closed' })], files, components: [] };
-
+  const { c, files } = box(GOLD);
+  if (closedNote) {
+    c.addTextDisplayComponents(text(`## Custom game queue\n${closedNote}`));
+    return { components: [c], files, flags: V2 };
+  }
   const n = ps.length, left = QMAX - n;
   const bar = '▰'.repeat(n) + '▱'.repeat(left);
-  const status = `${bar}  **${n}/${QMAX}** · ${left ? `${left} spot${left === 1 ? '' : 's'} left` : 'full'}`;
-  const list = ps.map((p, k) => `\`${String(k + 1).padStart(2)}\` ${p.icon} <@${p.id}> · ${p.label.replace(/ \d+LP|\*$/g, '')}` +
-    ` · ${p.roles?.[0] ? ROLE_ICON[p.roles[0]] : 'Fill'}`);
-  const parts = [status, n ? list.join('\n') : 'Nobody yet. Press **Join queue** to play.'];
+  c.addTextDisplayComponents(text(`## Custom game queue\n${bar}  **${n}/${QMAX}** · ${left ? `${plural(left, 'spot')} left` : 'full'}`));
+  c.addSeparatorComponents(divider());
   if (n) {
+    const list = ps.map((p, k) => `\`${String(k + 1).padStart(2)}\` ${p.icon} <@${p.id}> · ${short(p.label).replace(/\*$/, '')}` +
+      ` · ${p.roles?.[0] ? `${ROLE_ICON[p.roles[0]]} ${cap(p.roles[0])}` : '🎲 Fill'}`);
     const { line, missing } = roleSummary(ps);
     const avg = ps.reduce((sum, p) => sum + p.rating, 0) / n;
-    parts.push(`-# Mains ${line} · avg ${ratingLabel(avg)}` + (missing.length && n >= 4 ? `\n-# Nobody plays ${missing.map(cap).join(' or ')} yet` : ''));
-  }
-  if (q.last) parts.push(`✅ Last match: [teams](${q.last.url}) <t:${Math.floor(q.last.t / 1000)}:R>`);
-  e.setDescription(parts.join('\n\n'))
-    .setFooter({ text: `Teams are made automatically at ${QMAX}. Anyone in the queue can start earlier.` });
-  return { embeds: [e], files, components: [rowOf(
+    list.push(`-# Mains ${line} · avg ${ratingLabel(avg)}` + (missing.length && n >= 4 ? `\n-# Nobody plays ${missing.map(cap).join(' or ')} yet` : ''));
+    c.addTextDisplayComponents(text(list.join('\n')));
+  } else c.addTextDisplayComponents(text('Nobody yet. Press **Join queue** to play.'));
+  if (q.last) c.addTextDisplayComponents(text(`✅ Last match: [Game ${q.games || ''}](${q.last.url}) <t:${Math.floor(q.last.t / 1000)}:R>`.replace('[Game ]', '[teams]')));
+  c.addSeparatorComponents(divider()).addActionRowComponents(rowOf(
     btn('q:join', 'Join queue', ButtonStyle.Success), btn('q:leave', 'Leave', ButtonStyle.Danger),
     btn('q:start', n >= 2 ? `Start now (${n})` : 'Start now', ButtonStyle.Primary).setDisabled(n < 2),
-    btn('q:me', 'My profile', ButtonStyle.Secondary), btn('q:host', 'Host', ButtonStyle.Secondary))] };
+    btn('q:me', 'My profile', ButtonStyle.Secondary), btn('q:host', 'Host', ButtonStyle.Secondary)));
+  c.addTextDisplayComponents(text(`-# Teams are made automatically at ${QMAX}. Anyone in the queue can start earlier.`));
+  return { components: [c], files, flags: V2 };
 }
 
 async function openQueue(i) {
@@ -875,10 +902,10 @@ async function popQueue(i, q) {
   q.popping = true;
   try {
     const ids = q.ids.slice();
-    const s = { queue: true, owner: q.host, game: (q.games || 0) + 1, res: await makeTeams(ids), moved: false, t: Date.now() };
+    const s = { queue: true, owner: q.host, game: (q.games || 0) + 1, res: await makeTeams(ids), moved: false, t: Date.now(),
+      ping: `🔔 **Match ready!** ${ids.map((id) => `<@${id}>`).join(' ')}` };
     const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
-    const msg = await ch.send({ content: `🔔 **Match ready!** ${ids.map((id) => `<@${id}>`).join(' ')}`,
-      allowedMentions: { users: ids }, ...renderTeams(s, !!teamVcs(i.guild)) });
+    const msg = await ch.send({ ...renderTeams(s, !!teamVcs(i.guild)), allowedMentions: { users: ids } });
     sessions.set(msg.id, s);
     q.ids = q.ids.filter((id) => !ids.includes(id)); // anyone who joined while we were building stays queued
     q.games = (q.games || 0) + 1;
@@ -903,7 +930,7 @@ function editQueue(i, q) {
   const run = (queueEdits.get(key) || Promise.resolve()).then(async () => {
     let snap, payload;
     do { snap = q.ids.join(); payload = await renderQueue(q); } while (snap !== q.ids.join());
-    return i.editReply(payload);
+    return i.editReply(ed(i, payload));
   });
   queueEdits.set(key, run.catch(() => {}));
   return run;
@@ -917,7 +944,7 @@ async function onQueue(i) {
   const no = (content) => i.reply({ content, flags: EPH });
   if (q.popping && id !== 'q:me') return no('Making teams… try again in a second.');
 
-  if (id === 'q:me') return i.reply({ ...panel(uid), flags: EPH });
+  if (id === 'q:me') return i.reply({ ...panel(uid), flags: EPH | V2 });
   if (id === 'q:host') {
     if (uid !== q.host && !isAdmin(i)) return no(`Only the host (<@${q.host}>) or Manage Server can do that.`);
     await i.deferReply({ flags: EPH });
@@ -941,7 +968,7 @@ async function onQueue(i) {
   } else if (id === 'q:close') {
     if (uid !== q.host && !isAdmin(i)) return no('Only the host (or Manage Server) can close the queue.');
     queues.delete(i.message.id);
-    return i.update(await renderQueue(q, `Closed by <@${uid}> after ${q.games || 0} game${q.games === 1 ? '' : 's'}.`));
+    return i.update(ed(i, await renderQueue(q, `Closed by <@${uid}> after ${plural(q.games || 0, 'game')}.`)));
   } else if (id === 'q:start') {
     if (!inQ && uid !== q.host && !isAdmin(i)) return no('Join the queue to start the game.');
     if (q.ids.length < 2) return no('Need at least 2 players.');
@@ -974,7 +1001,7 @@ async function onHost(i) {
   if (act === 'kick') {
     const gone = i.values[0];
     q.ids = q.ids.filter((x) => x !== gone); q.t = Date.now();
-    await publicMsg?.edit(await renderQueue(q)).catch((e) => console.error('queue edit failed:', e.message));
+    await publicMsg?.edit(edm(publicMsg, await renderQueue(q))).catch((e) => console.error('queue edit failed:', e.message));
     return i.editReply(await hostMenu(i, qid, q, `Removed <@${gone}>.`));
   }
   if (act === 'bump') {
@@ -983,7 +1010,7 @@ async function onHost(i) {
   }
   if (act === 'close') {
     queues.delete(qid);
-    await publicMsg?.edit(await renderQueue(q, `Closed by <@${i.user.id}> after ${q.games || 0} game${q.games === 1 ? '' : 's'}.`)).catch((e) => console.error('queue edit failed:', e.message));
+    await publicMsg?.edit(edm(publicMsg, await renderQueue(q, `Closed by <@${i.user.id}> after ${plural(q.games || 0, 'game')}.`))).catch((e) => console.error('queue edit failed:', e.message));
     return i.editReply({ content: 'Queue closed.', components: [] });
   }
 }
@@ -1075,6 +1102,6 @@ function start() {
 if (require.main === module) start();
 module.exports = {
   parseRiotId, parseRank, ratingLabel, toRating, pickSplit, toUnits, assignRoles, makeTeams, buildPlayers, compose,
-  startDraft, draftPick, draftCaptain, pickTeam, applyResult, undoResult, boardEmbed, getRank, balance, fakePlayers, testLobbies,
-  teamVcs, queues, renderQueue, persistLive, restoreLive, seasonReset, panel, loadCrests, crests, rankIcon, renderTeams, renderDraft, linkModal, rankModal, handle, db, sessions,
+  startDraft, draftPick, draftCaptain, pickTeam, applyResult, undoResult, renderBoard, getRank, balance, fakePlayers, testLobbies,
+  V2, teamVcs, queues, renderQueue, persistLive, restoreLive, seasonReset, panel, loadCrests, crests, rankIcon, renderTeams, renderDraft, linkModal, rankModal, handle, db, sessions,
 };

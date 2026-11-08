@@ -46,7 +46,21 @@ global.fetch = async (url) => {
 // ── fake Discord ─────────────────────────────────────────────────────────
 const U = (n) => String(1000 + n); // user ids
 const valid = (p) => { p.embeds?.forEach((e) => e.toJSON()); p.components?.forEach((r) => r.toJSON()); return p; };
-const body = (p) => JSON.stringify([p.content, ...(p.embeds || []).map((e) => e.toJSON())]);
+const body = (p) => JSON.stringify([p.content, ...(p.embeds || []).map((e) => e.toJSON()), ...(p.components || []).map((c) => (c.toJSON ? c.toJSON() : c))]);
+// every Text Display in a components-v2 payload, joined (what the user reads)
+const texts = (p) => {
+  const out = [];
+  const walk = (c) => { c = c.toJSON ? c.toJSON() : c; if (c.type === 10) out.push(c.content); (c.components || []).forEach(walk); };
+  (p.components || []).forEach(walk);
+  return out.join('\n');
+};
+// all buttons/selects anywhere in the payload, by label or custom id
+const controls = (p) => {
+  const out = [];
+  const walk = (c) => { c = c.toJSON ? c.toJSON() : c; if (c.type === 2 || c.type === 3 || c.type === 5) out.push(c); (c.components || []).forEach(walk); if (c.accessory) walk(c.accessory); };
+  (p.components || []).forEach(walk);
+  return out;
+};
 const last = (i, name) => [...i.calls].reverse().find((c) => c[0] === name)?.[1];
 
 function mk(kind, o = {}) {
@@ -379,9 +393,10 @@ test('panel renders valid components in every state', () => {
   for (const st of states) {
     db.users[U(1)] = st;
     const p = valid(m.panel(U(1), 'hello'));
-    assert.ok(p.components.length >= 3 && p.components.length <= 5);
+    assert.equal(p.flags, m.V2);
+    assert.ok(controls(p).length >= 6, 'buttons and pickers live inside the box');
   }
-  assert.match(body(m.panel(U(1))), /3W 1L · 75%/);
+  assert.match(texts(m.panel(U(1))), /3W 1L · 75%/);
 });
 
 // ── making teams ─────────────────────────────────────────────────────────
@@ -407,31 +422,38 @@ test('Make teams posts the embed, keeps a session, and links back from the panel
   assert.deepEqual(s.res.teams.map((t) => t.length), [5, 5]);
   assert.equal(new Set(s.res.teams.flat().map((p) => p.id)).size, 10);
   assert.deepEqual(s.res.teams.map((t) => t.map((p) => p.role)), [['top', 'jungle', 'mid', 'bot', 'support'], ['top', 'jungle', 'mid', 'bot', 'support']]);
-  const labels = w.posted[0].components.flatMap((r) => r.toJSON().components.map((c) => c.label));
+  const labels = controls(w.posted[0]).map((c) => c.label);
   assert.deepEqual(labels, ['Reroll', 'Captain draft', 'Move to team channels', '🔵 Blue won', '🔴 Red won']);
   assert.equal(list.length, 10);
 });
 
-test('teams view: one embed with header, two team sections of Role | Player | Rank columns, winner trophy', async () => {
+test('teams view: one box with banner, title, balance, a section per team (role · player · rank rows), winner trophy', async () => {
   const { s } = await startTeams(10);
   const out = m.renderTeams(s, false);
-  assert.equal(out.embeds.length, 1);
-  const e = out.embeds[0].toJSON();
-  assert.match(e.description, /Even match|Close|Uneven/);
-  assert.match(e.fields[0].name, /^🔵 Blue Team$/);
-  assert.match(e.fields[4].name, /^🔴 Red Team$/);
-  assert.match(e.fields[0].value, / avg$/);
-  for (const o of [1, 5]) {
-    assert.deepEqual(e.fields.slice(o, o + 3).map((f) => f.name), ['Role', 'Player', 'Rank']);
-    assert.ok(e.fields.slice(o, o + 3).every((f) => f.inline && f.value.split('\n').length === 5)); // one line per player so rows align
-    assert.match(e.fields[o].value, /\*\*Top\*\*\n.*\*\*Jungle\*\*\n.*\*\*Mid\*\*\n.*\*\*Bot\*\*\n.*\*\*Support\*\*/);
-    assert.match(e.fields[o + 2].value, /^(⚫|🟤|⚪|🟡|🔷|🟢|💎|🟣|<:lol_)/);
+  assert.equal(out.flags, m.V2);
+  assert.equal(out.components.length, 1, 'everything in one box');
+  const box = out.components[0].toJSON();
+  assert.equal(box.type, 17);
+  assert.equal(box.components[0].type, 12, 'banner on top');
+  assert.equal(box.components[0].items[0].media.url, 'attachment://banner.png');
+  const t = texts(out);
+  assert.match(t, /^## Teams\n/);
+  assert.match(t, /Even match|Close match|favoured/);
+  const blue = t.split('### ')[1], red = t.split('### ')[2];
+  assert.match(blue, /^🔵 Blue Team {2}· .+ avg\n/);
+  assert.match(red, /^🔴 Red Team {2}· .+ avg\n/);
+  for (const team of [blue, red]) {
+    const rows = team.trim().split('\n').slice(1).filter((l) => !l.startsWith('-#'));
+    assert.equal(rows.length, 5);
+    assert.deepEqual(rows.map((r) => /\*\*(\w+)\*\*/.exec(r)[1]), ['Top', 'Jungle', 'Mid', 'Bot', 'Support']);
+    for (const r of rows) assert.match(r, /\*\* · <@\d+> · (⚫|🟤|⚪|🟡|🔷|🟢|💎|🟣|<:lol_)/);
   }
   s.report = m.applyResult(s.res, 1, true);
-  const done = m.renderTeams(s, false).embeds[0].toJSON();
-  assert.match(done.fields[4].name, /^🏆 Red Team/);
-  assert.match(done.fields[0].name, /^🔵 Blue Team/);
-  assert.match(done.description, /Red won/);
+  const done = texts(m.renderTeams(s, false));
+  assert.match(done, /### 🏆 Red Team/);
+  assert.match(done, /### 🔵 Blue Team/);
+  assert.match(done, /## Teams · 🔴 Red won/);
+  assert.equal(m.renderTeams(s, false).components[0].toJSON().accent_color, 0xef4444, 'box takes the winner colour');
 });
 
 test('rank icons: tiers, apex, unranked and unlinked players', async () => {
@@ -446,7 +468,7 @@ test('rank icons: tiers, apex, unranked and unlinked players', async () => {
 
 test('Make teams without team channels hides the move button; unlinked players are called out', async () => {
   const { w } = await startTeams(4, { teamChannels: false });
-  const labels = w.posted[0].components.flatMap((r) => r.toJSON().components.map((c) => c.label));
+  const labels = controls(w.posted[0]).map((c) => c.label);
   assert.ok(!labels.includes('Move to team channels'));
   reset();
   const list = ids(4);
@@ -478,7 +500,7 @@ test('Move to team channels then Move everyone back', async () => {
   await m.handle(mv);
   assert.match(last(mv, 'editReply'), /Moved 6/);
   s.res.teams.forEach((team, side) => team.forEach((p) => assert.equal(w.members.get(p.id).voice.channelId, side ? 'vr' : 'vb')));
-  assert.deepEqual(w.edits.at(-1).components.map((r) => r.toJSON().components.map((c) => c.label)), [['Move everyone back'], ['🔵 Blue won', '🔴 Red won']]);
+  assert.deepEqual(controls(w.edits.at(-1)).map((c) => c.label), ['Move everyone back', '🔵 Blue won', '🔴 Red won']);
   const back = press(w, 'back', U(1)); // pressed from inside a team channel
   await m.handle(back);
   assert.match(last(back, 'editReply'), /Moved 6/);
@@ -514,7 +536,7 @@ test('Blue/Red won updates records, adjusts balancing ratings, can be undone', a
   const win = press(w, 'win1', U(3));
   await m.handle(win);
   assert.match(body(last(win, 'update')), /Red won/);
-  assert.deepEqual(last(win, 'update').components.map((r) => r.toJSON().components.map((c) => c.label)), [['Play again', 'Undo result']]);
+  assert.deepEqual(controls(last(win, 'update')).map((c) => c.label), ['Play again', 'Undo result']);
   s.res.teams[1].forEach((p) => { assert.equal(db.users[p.id].w, 1); assert.ok(db.users[p.id].adj > 0); });
   s.res.teams[0].forEach((p) => { assert.equal(db.users[p.id].l, 1); assert.ok(db.users[p.id].adj < 0); });
   const sum = Object.values(db.users).reduce((t, u) => t + (u.adj || 0), 0);
@@ -607,7 +629,7 @@ test('captain draft flow: only the captain can pick, finishes into normal teams,
   const start = press(w, 'draft', U(1));
   await m.handle(start);
   assert.ok(s.draft);
-  const menu = last(start, 'editReply').components[0].toJSON().components[0];
+  const menu = controls(last(start, 'editReply')).find((c) => c.custom_id === 'pick');
   assert.equal(menu.options.length, 4);
   assert.match(menu.options[0].label, /^Name/);
 
@@ -684,7 +706,7 @@ test('practice Make teams works alone: fake players by name, no move button, �
   assert.match(text, new RegExp(`<@${U(1)}>`));
   assert.doesNotMatch(text, /<@test:/);
   assert.doesNotMatch(text, /practice lobby, not saved/);
-  const labels = w.posted[0].components.flatMap((r) => r.toJSON().components.map((c) => c.label));
+  const labels = controls(w.posted[0]).map((c) => c.label);
   assert.deepEqual(labels, ['Reroll', 'Captain draft', '🔵 Blue won', '🔴 Red won']);
   assert.match(body(last(make, 'editReply')), /Test teams posted/);
 });
@@ -811,7 +833,7 @@ test('teams message carries the banner image', async () => {
   const { w, s } = await startPractice(8);
   const out = m.renderTeams(s, false);
   assert.equal(out.files.length, 1);
-  assert.equal(out.embeds[0].toJSON().image.url, 'attachment://banner.png');
+  assert.equal(out.components[0].toJSON().components[0].items[0].media.url, 'attachment://banner.png');
 });
 
 // ── queue ────────────────────────────────────────────────────────────────
@@ -833,8 +855,8 @@ test('queue: /queue posts an empty queue with Join/Leave/Start/Profile/Host', as
   assert.equal(q.host, U(1));
   const out = last(open, 'editReply');
   assert.match(body(out), /Nobody yet/);
-  assert.deepEqual(out.components[0].toJSON().components.map((c) => c.label), ['Join queue', 'Leave', 'Start now', 'My profile', 'Host']);
-  assert.equal(out.components[0].toJSON().components[2].disabled, true);
+  assert.deepEqual(controls(out).map((c) => c.label), ['Join queue', 'Leave', 'Start now', 'My profile', 'Host']);
+  assert.equal(controls(out)[2].disabled, true);
 });
 
 test('queue: join, duplicate join, leave, full queue', async () => {
@@ -859,7 +881,7 @@ test('queue: start posts a pinging teams message, queue resets and stays open; r
   assert.match(last(outsider, 'reply').content, /Join the queue/);
   const go = qpress('q:start', list[0]); await m.handle(go);
   assert.equal(w.posted.length, 2, 'teams, then the queue re-posted below them');
-  assert.match(w.posted[0].content, /Match ready/);
+  assert.match(texts(w.posted[0]), /^🔔 \*\*Match ready!\*\*/);
   assert.deepEqual(w.posted[0].allowedMentions.users, list.slice(0, 6));
   assert.equal(m.queues.size, 1, 'queue stays open');
   assert.equal(m.queues.get('msg2'), q, 'under its new message id');
@@ -871,7 +893,7 @@ test('queue: start posts a pinging teams message, queue resets and stays open; r
   assert.equal(s.res.teams.flat().length, 6);
   // a player can reroll without being in voice; strangers cannot
   const rr = press(w, 'reroll', list[1]); await m.handle(rr);
-  assert.equal(last(rr, 'editReply').embeds.length, 1);
+  assert.equal(last(rr, 'editReply').components.length, 2, 'ping line + box');
   const stranger = press(w, 'reroll', U(77)); await m.handle(stranger);
   assert.match(last(stranger, 'reply').content, /Only players/);
   const win = press(w, 'win1', list[2]); await m.handle(win);
@@ -935,18 +957,15 @@ test('queue: draft works from a queue, close is host-only', async () => {
 
 test('teams view: win-chance bar, off-role marker, result shows per-player rating change', async () => {
   const { s } = await startTeams(10);
-  const e = m.renderTeams(s, false).embeds[0].toJSON();
-  assert.match(e.description, /🔵 \*\*\d+%\*\* (🟦|🟥){10} \*\*\d+%\*\* 🔴/);
-  // force an off-role assignment
+  assert.match(texts(m.renderTeams(s, false)), /🔵 \*\*\d+%\*\* (🟦|🟥){10} \*\*\d+%\*\* 🔴/);
   const p = s.res.teams[0][0]; p.roles = ['support']; p.role = 'top';
-  const e2 = m.renderTeams(s, false).embeds[0].toJSON();
-  assert.match(e2.fields[1].value, /Top\*\* ↻/);
-  assert.match(e2.footer.text, /off-role/);
+  const t2 = texts(m.renderTeams(s, false));
+  assert.match(t2, /\*\*Top\*\* ↻ · /);
+  assert.match(t2, /-# .*↻ off-role/);
   s.report = m.applyResult(s.res, 0, true);
-  const e3 = m.renderTeams(s, false).embeds[0].toJSON();
-  assert.equal(e3.fields[3].name, 'Rank · in-house');
-  assert.match(e3.fields[3].value, /\*\*\+\d+\*\*/);
-  assert.match(e3.fields[7].value, /\*\*−\d+\*\*/);
+  const [blue, red] = texts(m.renderTeams(s, false)).split('### ').slice(1);
+  assert.match(blue, /\*\*\+\d+\*\*/);
+  assert.match(red, /\*\*−\d+\*\*/);
 });
 
 test('play again: posts fresh teams for the same players in a new message, old one keeps the result', async () => {
@@ -959,7 +978,7 @@ test('play again: posts fresh teams for the same players in a new message, old o
   assert.ok(ns && !ns.report);
   assert.equal(ns.res.teams.flat().length, 6);
   assert.match(body(last(again, 'editReply')), /Next game/);
-  assert.deepEqual(last(again, 'editReply').components[0].toJSON().components.map((c) => c.label), ['Undo result']);
+  assert.deepEqual(controls(last(again, 'editReply')).map((c) => c.label), ['Undo result']);
   const twice = press(w, 'again', list[0], { member: w.members.get(list[0]) }); await m.handle(twice);
   assert.match(last(twice, 'reply').content, /already/);
 });
@@ -967,14 +986,13 @@ test('play again: posts fresh teams for the same players in a new message, old o
 test('leaderboard shows your own position below the top 10; panel shows your rank crest', () => {
   reset();
   for (let k = 1; k <= 12; k++) db.users[U(k)] = { override: 2000 - k * 50, w: 1, l: 1 };
-  const e = m.boardEmbed(U(12)).toJSON();
-  const lines = e.description.split('\n');
+  const lines = texts(m.renderBoard(U(12))).split('\n').filter((l) => !l.startsWith('-#'));
   assert.equal(lines.length, 12);
   assert.equal(lines[10], '⋯');
   assert.match(lines[11], new RegExp(`12.*<@${U(12)}>`));
-  assert.equal(m.boardEmbed(U(1)).toJSON().description.split('\n').length, 10);
+  assert.equal(texts(m.renderBoard(U(1))).split('\n').filter((l) => !l.startsWith('-#')).length, 10);
   const p = m.panel(U(1));
-  assert.equal(p.embeds[0].toJSON().thumbnail.url, 'attachment://crest.png');
+  assert.equal(p.components[0].toJSON().components[0].accessory.media.url, 'attachment://crest.png');
   assert.match(String(p.files[0].attachment), /icons\/(gold|silver|platinum)\.png$/);
   assert.equal(m.panel(U(99)).files.length, 0, 'no crest before linking');
 });
@@ -1021,7 +1039,7 @@ test('/leaderboard posts the board publicly', async () => {
   const i = mk('cmd', { user: U(1), over: { commandName: 'leaderboard' } });
   await m.handle(i);
   const r = last(i, 'reply');
-  assert.ok(!r.flags, 'public');
+  assert.equal(r.flags, m.V2, 'public (not ephemeral)');
   assert.match(body(r), new RegExp(`<@${U(1)}>`));
 });
 
@@ -1046,9 +1064,8 @@ test('draft with 10 real players and long emoji codes stays within embed limits'
     const ps = Array.from({ length: 10 }, (_, k) => ({ id: String(100000000000000000n + BigInt(k)), rating: 1600 + k, label: 'Platinum III (flex)*', icon: m.rankIcon(1600), roles: [R[k % 5]], linked: true }));
     const s = { draft: m.startDraft(ps, Object.fromEntries(ps.map((p) => [p.id, 'A very long display name'.repeat(2)]))) };
     const out = m.renderDraft(s);
-    const e = out.embeds[0].toJSON();
-    for (const f of e.fields) assert.ok(f.value.length <= 1024, `${f.name}: ${f.value.length}`);
     out.components.forEach((r) => r.toJSON());
+    assert.ok(texts(out).length <= 4000, 'components v2 text limit');
   } finally { for (const t of Object.keys(m.crests)) delete m.crests[t]; }
 });
 
@@ -1078,7 +1095,7 @@ test('queue host tools: host-only, remove a player (public message updates), clo
   await m.handle(close);
   assert.equal(m.queues.size, 0);
   assert.match(body(edits[1]), /Closed by/);
-  assert.equal(edits[1].components.length, 0);
+  assert.equal(controls(edits[1]).length, 0);
 });
 
 test('recent form: history recorded, undo removes it, streak shown on panel and leaderboard', () => {
@@ -1093,7 +1110,7 @@ test('recent form: history recorded, undo removes it, streak shown on panel and 
   assert.deepEqual(db.users[U(1)].hist, ['W', 'W', 'W']);
   assert.match(body(m.panel(U(1))), /🟩🟩🟩 🔥3/);
   assert.match(body(m.panel(U(3))), /🟥🟥🟥/);
-  assert.match(m.boardEmbed().toJSON().description, /🔥3/);
+  assert.match(texts(m.renderBoard()), /🔥3/);
   for (let k = 0; k < 12; k++) m.applyResult(res, 1);
   assert.equal(db.users[U(1)].hist.length, 10, 'only the last 10 are kept');
 });
@@ -1133,17 +1150,30 @@ test('season reset: admin-only, confirm step, archives standings and clears resu
   assert.equal(db.users[U(1)].puuid, 'P1');
   assert.deepEqual(db.users[U(1)].roles, ['mid']);
   assert.equal(db.users[U(2)].override, 900);
-  assert.match(m.boardEmbed().toJSON().description, /No results yet/);
+  assert.match(texts(m.renderBoard()), /No results yet/);
 });
 
 test('queue games are numbered, Play again continues the count', async () => {
   const { w, q, qpress, list } = await openQ();
   q.ids = list.slice(0, 4);
   await m.handle(qpress('q:start', list[0]));
-  assert.match(body(w.posted[0]), /"title":"Game 1"/);
+  assert.match(texts(w.posted[0]), /## Game 1\n/);
   const s = m.sessions.get('msg1');
   await m.handle(press(w, 'win0', s.res.teams[0][0].id, { channel: w.channel }));
   await m.handle(press(w, 'again', s.res.teams[0][0].id, { channel: w.channel, channelId: 'c1' }));
-  assert.match(body(w.posted[2]), /"title":"Game 2"/);
+  assert.match(texts(w.posted[2]), /## Game 2\n/);
   assert.equal(q.games, 2);
+});
+
+test('editing an older embed-style message switches it to the new layout (clears content and embeds)', async () => {
+  const { w, list } = await startTeams(4);
+  const legacy = press(w, 'reroll', list[0], { member: w.members.get(list[0]) });
+  await m.handle(legacy);
+  const out = last(legacy, 'editReply');
+  assert.equal(out.content, null);
+  assert.deepEqual(out.embeds, []);
+  assert.equal(out.flags, m.V2);
+  const modern = press(w, 'reroll', list[0], { member: w.members.get(list[0]), message: { id: 'msg1', flags: { has: (f) => f === m.V2 } } });
+  await m.handle(modern);
+  assert.ok(!('content' in last(modern, 'editReply')), 'already new-style: nothing extra');
 });

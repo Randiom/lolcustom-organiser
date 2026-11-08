@@ -6,5 +6,5 @@
   "scripts": { "start": "node lolteams.js", "test": "node --test" },
   "engines": { "node": ">=20.12" },
   "license": "MIT",
-  "dependencies": { "discord.js": "^14.16.0" }
+  "dependencies": { "discord.js": "^14.19.0" }
 }
