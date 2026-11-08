@@ -1078,3 +1078,20 @@ test('queue host tools: host-only, remove a player (public message updates), clo
   assert.match(body(edits[1]), /Closed by/);
   assert.equal(edits[1].components.length, 0);
 });
+
+test('recent form: history recorded, undo removes it, streak shown on panel and leaderboard', () => {
+  reset();
+  const team = (a) => a.map((id) => ({ id }));
+  const res = { teams: [team([U(1), U(2)]), team([U(3), U(4)])], avg: [1000, 1000] };
+  for (let k = 0; k < 3; k++) m.applyResult(res, 0);
+  const rep = m.applyResult(res, 0);
+  assert.deepEqual(db.users[U(1)].hist, ['W', 'W', 'W', 'W']);
+  assert.deepEqual(db.users[U(3)].hist, ['L', 'L', 'L', 'L']);
+  m.undoResult(rep);
+  assert.deepEqual(db.users[U(1)].hist, ['W', 'W', 'W']);
+  assert.match(body(m.panel(U(1))), /🟩🟩🟩 🔥3/);
+  assert.match(body(m.panel(U(3))), /🟥🟥🟥/);
+  assert.match(m.boardEmbed().toJSON().description, /🔥3/);
+  for (let k = 0; k < 12; k++) m.applyResult(res, 1);
+  assert.equal(db.users[U(1)].hist.length, 10, 'only the last 10 are kept');
+});

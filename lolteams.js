@@ -316,6 +316,7 @@ function applyResult(res, winner, dry = false) { // dry = practice lobby: comput
     const u = (db.users[id] ||= {}), before = u.adj || 0;
     u.adj = Math.max(-ADJ_MAX, Math.min(ADJ_MAX, before + (won ? d : -d)));
     u[won ? 'w' : 'l'] = (u[won ? 'w' : 'l'] || 0) + 1;
+    u.hist = [...(u.hist || []), won ? 'W' : 'L'].slice(-10); // recent form, newest last
     report.deltas[id] = u.adj - before;
   };
   report.won.forEach((id) => bump(id, true));
@@ -331,6 +332,7 @@ function undoResult(report) {
     u.adj = (u.adj || 0) - report.deltas[id];
     const k = report.won.includes(id) ? 'w' : 'l';
     u[k] = Math.max(0, (u[k] || 0) - 1);
+    if (u.hist?.at(-1) === k.toUpperCase()) u.hist.pop();
   }
   save();
 }
@@ -456,6 +458,8 @@ function renderDraft(s) {
 const LB_FILE = `${__dirname}/icons/leaderboard.png`;
 const LB_BANNER = fs.existsSync(LB_FILE) ? [new AttachmentBuilder(LB_FILE, { name: 'leaderboard.png' })] : [];
 
+const form = (u, n = 5) => (u.hist || []).slice(-n).map((r) => (r === 'W' ? '🟩' : '🟥')).join('');
+const streak = (u) => { const h = u.hist || []; let k = 0; while (k < h.length && h[h.length - 1 - k] === 'W') k++; return k; };
 const record = (u) => { const g = (u.w || 0) + (u.l || 0); return g ? `${u.w || 0}W ${u.l || 0}L · ${Math.round(((u.w || 0) / g) * 100)}%` : 'No games yet'; };
 function boardEmbed(viewer) {
   const all = Object.entries(db.users).map(([id, u]) => {
@@ -464,7 +468,7 @@ function boardEmbed(viewer) {
   }).filter((r) => r.g > 0).sort((a, b) => b.rating - a.rating || (b.u.w || 0) - (a.u.w || 0));
   const medal = ['🥇', '🥈', '🥉'];
   const line = (r, i) => `${medal[i] ?? `\`${String(i + 1).padStart(2)}\``} ${rankIcon(r.rating)} <@${r.id}> · ${ratingLabel(r.rating)} · ${record(r.u)}` +
-    (r.adj ? ` · ${signed(r.adj)}` : '');
+    (r.adj ? ` · ${signed(r.adj)}` : '') + (streak(r.u) >= 3 ? ` · 🔥${streak(r.u)}` : '');
   const rows = all.slice(0, 10).map(line);
   const me = viewer ? all.findIndex((r) => r.id === viewer) : -1;
   if (me >= 10) rows.push('⋯', line(all[me], me));
@@ -489,7 +493,7 @@ function panel(tid, notice) {
     : rk ? `${rk.rating != null ? rankIcon(rk.rating) : unrankedIcon()} ${rk.label}\n-# updated <t:${Math.floor(rk.at / 1000)}:R>` : '—';
   const roleLine = !roles ? 'Not set\n-# counts as Fill' : !roles.length ? '🎲 Fill (any role)'
     : `${ROLE_ICON[main]} **${cap(main)}**` + (roles.length > 1 ? `\n-# also ${roles.slice(1).map(cap).join(', ')}` : '');
-  const inhouse = (u.w || u.l) ? `${record(u)}\n-# rating ${signed(u.adj || 0)}` : 'No games yet';
+  const inhouse = (u.w || u.l) ? `${record(u)}\n${form(u) ? `${form(u)}${streak(u) >= 3 ? ` 🔥${streak(u)}` : ''}\n` : ''}-# rating ${signed(u.adj || 0)}` : 'No games yet';
   const testN = testLobbies.get(tid);
   const hint = testN ? 'Press Make teams. No voice channel needed.'
     : !linked && u.override == null ? 'Start with Link account.'
