@@ -72,9 +72,9 @@ function mk(kind, o = {}) {
   };
   const i = {
     user: { id: o.user }, memberPermissions: { has: () => !!o.admin }, member: o.member, guild: o.guild, channel: o.channel,
-    channelId: 'c1', createdTimestamp: o.createdTimestamp ?? Date.now(), customId: o.customId, values: o.values,
+    channelId: 'c1', guildId: o.guildId ?? 'g1', createdTimestamp: o.createdTimestamp ?? Date.now(), customId: o.customId, values: o.values,
     users: o.users, message: o.message, client: { ws: { ping: 7 } }, deferred: false, replied: false, calls,
-    options: { getUser: () => o.target ?? null, getInteger: () => o.test ?? null, getBoolean: () => o.reset ?? null },
+    options: { getUser: () => o.target ?? null, getInteger: () => o.test ?? null, getBoolean: (k) => (k === 'lanes' ? o.lanes : o.reset) ?? null },
     fields: { getTextInputValue: (k) => o.fields[k] },
     isChatInputCommand: () => kind === 'cmd', isModalSubmit: () => kind === 'modal', isMessageComponent: () => kind === 'comp',
     reply: rec('reply'), editReply: rec('editReply'), update: rec('update'), deferUpdate: rec('deferUpdate'),
@@ -108,7 +108,7 @@ function world(players, { teamChannels = true } = {}) {
 }
 
 const reset = () => {
-  db.users = {}; db.ranks = {}; m.sessions.clear(); m.testLobbies.clear(); m.queues.clear(); riotCalls.length = 0; riotMode = 'ok'; sent429 = false;
+  db.users = {}; db.ranks = {}; db.guilds = { g1: { lanes: true } }; m.sessions.clear(); m.testLobbies.clear(); m.queues.clear(); riotCalls.length = 0; riotMode = 'ok'; sent429 = false;
 };
 const seed = (list, f = (i) => 800 + i * 150) => list.forEach((id, i) => { db.users[id] = { override: f(i) }; });
 const ids = (n) => Array.from({ length: n }, (_, i) => U(i + 1));
@@ -1185,4 +1185,34 @@ test('editing an older embed-style message switches it to the new layout (clears
   const modern = press(w, 'reroll', list[0], { member: w.members.get(list[0]), message: { id: 'msg1', flags: { has: (f) => f === m.V2 } } });
   await m.handle(modern);
   assert.ok(!('content' in last(modern, 'editReply')), 'already new-style: nothing extra');
+});
+
+test('/settings lanes: admin-only; off (the default) lists players by rank without lanes; existing messages follow on next update', async () => {
+  const { w, s, list } = await startTeams(10);
+  assert.match(texts(m.renderTeams(s, false)), /`Top/);
+  const no = mk('cmd', { user: list[0], lanes: false, over: { commandName: 'settings' } });
+  await m.handle(no);
+  assert.match(last(no, 'reply').content, /Manage Server/);
+  assert.equal(db.guilds.g1.lanes, true);
+  const off = mk('cmd', { user: list[0], admin: true, lanes: false, over: { commandName: 'settings' } });
+  await m.handle(off);
+  assert.match(last(off, 'reply').content, /Lanes \*\*off\*\*/);
+  assert.equal(db.guilds.g1.lanes, false);
+  const rr = press(w, 'reroll', list[0], { member: w.members.get(list[0]) });
+  await m.handle(rr);
+  const t = texts(last(rr, 'editReply'));
+  assert.doesNotMatch(t, /`(Top|Jungle|Mid|Bot|Support)/);
+  assert.doesNotMatch(t, /off-role/);
+  for (const team of t.split('### ').slice(1)) {
+    const rows = team.trim().split('\n').slice(1).filter((l) => !l.startsWith('-#'));
+    assert.equal(rows.length, 5);
+    const rating = (r) => s.res.teams.flat().find((p) => r.includes(`<@${p.id}>`)).rating;
+    const rs = rows.map(rating);
+    assert.deepEqual(rs, rs.slice().sort((a, b) => b - a), 'strongest first');
+  }
+  // a fresh server has lanes off
+  const { w: w2, s: s2, list: l2 } = await startTeams(4);
+  db.guilds = {};
+  await m.handle(press(w2, 'reroll', l2[0], { member: w2.members.get(l2[0]) }));
+  assert.equal(s2.lanes, false);
 });

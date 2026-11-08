@@ -434,7 +434,10 @@ const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 // both teams as one table (so Blue's and Red's columns line up too), split back into a block per team
 function teamTexts(s) {
   const { res, report: rep } = s;
-  const rows = table(res.teams.flat().map((p) => [raw(ROLE_ICON[p.role]), cap(p.role) + offRole(p), raw(p.icon), short(p.label),
+  // lanes on: role · crest · rank …, in lane order; off: crest · rank …, strongest first
+  const order = (t) => (s.lanes ? t : t.slice().sort((a, b) => b.rating - a.rating));
+  const teams = res.teams.map(order);
+  const rows = table(teams.flat().map((p) => [...(s.lanes ? [raw(ROLE_ICON[p.role]), cap(p.role) + offRole(p)] : []), raw(p.icon), short(p.label),
     ...(rep ? [signed(rep.deltas[p.id] ?? 0)] : []), riotOf(p), raw(who(p))]));
   return [0, 1].map((n) => text([
     `### ${rep?.winner === n ? '🏆' : n ? '🔴' : '🔵'} ${n ? 'Red' : 'Blue'} Team  ·  ${rankIcon(res.avg[n])} ${ratingLabel(res.avg[n])} avg`,
@@ -457,7 +460,7 @@ function renderTeams(s, canMove) {
   const [blue, red] = teamTexts(s);
   c.addSeparatorComponents(divider()).addTextDisplayComponents(blue);
   c.addSeparatorComponents(divider()).addTextDisplayComponents(red);
-  const off = res.teams.flat().some((p) => offRole(p));
+  const off = s.lanes && res.teams.flat().some((p) => offRole(p));
   const foot = [res.flagged && `* counted as ${ratingLabel(DEFAULT_RATING)}`, off && '↻ off-role'].filter(Boolean);
   if (foot.length) c.addTextDisplayComponents(text(`-# ${foot.join(' · ')}`));
   c.addSeparatorComponents(divider());
@@ -618,9 +621,14 @@ const commands = [
     .addIntegerOption((o) => o.setName('test').setDescription('Practice lobby with fake players, no voice channel needed (needs Manage Server)')
       .setMinValue(2).setMaxValue(10)),
   new SlashCommandBuilder().setName('queue').setDescription('Open a queue in this channel that anyone can join'),
+  new SlashCommandBuilder().setName('settings').setDescription('Server settings for the custom games bot')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addBooleanOption((o) => o.setName('lanes').setDescription('Assign each player a lane on the teams message (default: off)').setRequired(true)),
   new SlashCommandBuilder().setName('leaderboard').setDescription('Post the in-house leaderboard in this channel')
     .addBooleanOption((o) => o.setName('reset').setDescription('Start a new season: archive and clear all in-house results (needs Manage Server)')),
 ];
+// per-server settings (db.guilds[guildId]); lanes: show an assigned lane per player (off = players sort out lanes themselves)
+const lanesOn = (guildId) => !!db.guilds?.[guildId]?.lanes;
 const isAdmin = (i) => !!i.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
 const canEdit = (i, tid) => i.user.id === tid || isAdmin(i);
 const humans = (vc) => [...vc.members.values()].filter((m) => !m.user.bot).map((m) => m.id);
@@ -630,6 +638,15 @@ const sessions = new Map(); // public teams message id -> { vcId, res, moved, dr
 
 async function onCommand(i) {
   if (i.commandName === 'queue') return openQueue(i);
+  if (i.commandName === 'settings') {
+    if (!isAdmin(i)) return i.reply({ content: 'Settings need Manage Server.', flags: EPH });
+    const on = !!i.options.getBoolean('lanes');
+    ((db.guilds ||= {})[i.guildId] ||= {}).lanes = on;
+    save();
+    return i.reply({ flags: EPH, content: on
+      ? '✅ Lanes **on**: every player gets a lane (Top, Jungle, Mid, Bot, Support) on the teams message, based on their roles.'
+      : '✅ Lanes **off**: teams list players by rank and you sort out lanes in the lobby. Roles still keep e.g. two mid mains on opposite teams.' });
+  }
   if (i.commandName === 'leaderboard') {
     if (!i.options.getBoolean?.('reset')) return i.reply(renderBoard());
     if (!isAdmin(i)) return i.reply({ content: 'Starting a new season needs Manage Server.', flags: EPH });
@@ -696,6 +713,7 @@ async function onPanel(i) { // buttons + selects on the ephemeral panel
 }
 
 async function postTeams(i, tid, s, label) {
+  s.lanes = lanesOn(i.guildId);
   try {
     const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
     const msg = await ch.send(renderTeams(s, !s.test && !!teamVcs(i.guild)));
@@ -762,6 +780,7 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
   const s = sessions.get(i.message.id);
   if (!s) return i.reply({ content: 'Expired. Run /lol and press Make teams again.', flags: EPH });
   s.t = Date.now();
+  s.lanes = lanesOn(i.guildId); // a settings change applies to open teams messages on their next update
   if (s.test && i.user.id !== s.owner) return i.reply({ content: 'This is someone else\'s practice lobby.', flags: EPH });
   const id = i.customId, vcs = teamVcs(i.guild), canMove = !s.test && !!vcs;
   const mayReport = s.res.teams.flat().some((p) => p.id === i.user.id) || isAdmin(i);
@@ -778,7 +797,7 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
     if (!mayReport) return i.reply(noReport);
     if (!s.report || s.next) return i.reply({ content: s.next ? 'Next game already started.' : 'Report the result first.', flags: EPH });
     await i.deferUpdate();
-    const base = { owner: s.owner, moved: false, t: Date.now() };
+    const base = { owner: s.owner, moved: false, t: Date.now(), lanes: s.lanes };
     let ns;
     if (s.test) ns = { ...base, test: true, ps: s.ps, names: s.names, res: balance(s.ps, s.res.key) };
     else {
@@ -931,7 +950,7 @@ async function popQueue(i, q) {
   q.popping = true;
   try {
     const ids = q.ids.slice();
-    const s = { queue: true, owner: q.host, game: (q.games || 0) + 1, res: await makeTeams(ids), moved: false, t: Date.now(),
+    const s = { queue: true, owner: q.host, game: (q.games || 0) + 1, res: await makeTeams(ids), moved: false, t: Date.now(), lanes: lanesOn(i.guildId),
       ping: `🔔 **Match ready!** ${ids.map((id) => `<@${id}>`).join(' ')}` };
     const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
     const msg = await ch.send({ ...renderTeams(s, !!teamVcs(i.guild)), allowedMentions: { users: ids } });

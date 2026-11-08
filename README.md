@@ -9,6 +9,7 @@ Discord bot for League of Legends custom games. Members link their Riot account,
 | `/lol` | Your private profile panel: link account, roles, duo, manual rank, **Make teams** from your voice channel |
 | `/leaderboard` | Post the in-house leaderboard in the channel |
 | `/lol test:8` | Practice lobby with fake players (Manage Server) |
+| `/settings lanes:true/false` | Assign each player a lane on the teams message (Manage Server). Off by default. |
 | `/leaderboard reset:true` | New season: archive the standings, then clear in-house results (Manage Server, asks to confirm). Links, roles and duos stay. |
 
 ## Queue
@@ -23,7 +24,7 @@ Discord bot for League of Legends custom games. Members link their Riot account,
 ## Teams
 - **Balanced by rank** (solo queue, flex fallback, manual rank for smurfs) plus the in-house rating. Among near-equal splits, the bot prefers the one where everyone gets a role they're happy with, then picks randomly so **Reroll** gives variety.
 - **Win chance bar** (🔵 52% … 48% 🔴) shows how even the match is.
-- **Roles:** main role plus "also OK with", or Fill. Each team gets one player per role. ↻ marks a player who got a role they didn't pick.
+- **Roles:** main role plus "also OK with", or Fill. Roles always steer balancing (two mid mains end up on opposite teams). Lanes are **off** by default: teams list players strongest first and you sort out lanes in the lobby. With `/settings lanes:true` each team gets one player per lane, and ↻ marks anyone placed on a role they didn't pick.
 - **Duo partner:** you're always on the same team when you're both playing.
 - **Captain draft:** the two highest-rated players captain, the lower-rated one picks first, snake order. Shows who is still available with rank and role.
 - **Results:** press 🔵 Blue won or 🔴 Red won. Everyone's in-house rating change is shown per player (Elo style, capped at ±300) and feeds back into balancing. **Undo** if someone misclicked. **Play again** posts fresh teams for the same players.
