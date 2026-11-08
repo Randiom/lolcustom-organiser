@@ -828,12 +828,12 @@ async function openQ(host = U(1)) {
   return { w, q, qpress, open, list };
 }
 
-test('queue: /queue posts an empty queue with Join/Leave/Make teams/Close', async () => {
+test('queue: /queue posts an empty queue with Join/Leave/Start/Profile/Close', async () => {
   const { q, open } = await openQ();
   assert.equal(q.host, U(1));
   const out = last(open, 'editReply');
   assert.match(body(out), /Nobody yet/);
-  assert.deepEqual(out.components[0].toJSON().components.map((c) => c.label), ['Join queue', 'Leave', 'Make teams', 'Close']);
+  assert.deepEqual(out.components[0].toJSON().components.map((c) => c.label), ['Join queue', 'Leave', 'Start now', 'My profile', 'Close']);
   assert.equal(out.components[0].toJSON().components[2].disabled, true);
 });
 
@@ -852,21 +852,22 @@ test('queue: join, duplicate join, leave, full queue', async () => {
   assert.match(last(full, 'reply').content, /full/);
 });
 
-test('queue: make teams posts a teams message, closes the queue, reroll/results work without voice', async () => {
+test('queue: start posts a pinging teams message, queue resets and stays open; reroll/results/move work without the lobby', async () => {
   const { w, q, qpress, list } = await openQ();
-  const one = qpress('q:start', list[0]); await m.handle(one);
   q.ids = list.slice(0, 6); // pretend six joined
   const outsider = qpress('q:start', U(77)); await m.handle(outsider);
   assert.match(last(outsider, 'reply').content, /Join the queue/);
   const go = qpress('q:start', list[0]); await m.handle(go);
   assert.equal(w.posted.length, 1);
-  assert.match(body(w.posted[0]), /Teams/);
-  assert.equal(m.queues.size, 0);
-  assert.match(body(last(go, 'editReply')), /Teams are ready/);
+  assert.match(w.posted[0].content, /Match ready/);
+  assert.deepEqual(w.posted[0].allowedMentions.users, list.slice(0, 6));
+  assert.equal(m.queues.size, 1, 'queue stays open');
+  assert.deepEqual(q.ids, []);
+  assert.equal(q.games, 1);
+  assert.match(body(last(go, 'editReply')), /Last match/);
   const s = m.sessions.get('msg1');
   assert.ok(s.queue);
   assert.equal(s.res.teams.flat().length, 6);
-  assert.ok(!JSON.stringify(w.posted[0].components.map((r) => r.toJSON())).includes('Move'));
   // a player can reroll without being in voice; strangers cannot
   const rr = press(w, 'reroll', list[1]); await m.handle(rr);
   assert.equal(last(rr, 'editReply').embeds.length, 1);
@@ -874,6 +875,43 @@ test('queue: make teams posts a teams message, closes the queue, reroll/results 
   assert.match(last(stranger, 'reply').content, /Only players/);
   const win = press(w, 'win1', list[2]); await m.handle(win);
   assert.match(body(last(win, 'update')), /Red won/);
+});
+
+test('queue: pops automatically at 10, profile button opens your panel, one queue per channel', async () => {
+  const { w, q, qpress, list, open } = await openQ();
+  q.ids = ids(9);
+  const tenth = qpress('q:join', U(10)); await m.handle(tenth);
+  assert.equal(w.posted.length, 1);
+  assert.equal(m.sessions.get('msg1').res.teams.flat().length, 10);
+  assert.deepEqual(q.ids, []);
+  const me = qpress('q:me', list[0]); await m.handle(me);
+  assert.match(body(last(me, 'reply')), /LoL profile/);
+  assert.ok(last(me, 'reply').flags);
+  q.channelId = 'c1';
+  const again = mk('cmd', { user: U(2), guild: w.guild, channel: w.channel, over: { commandName: 'queue', channelId: 'c1' } });
+  await m.handle(again);
+  assert.match(last(again, 'reply').content, /already a queue/);
+});
+
+test('queue: unlinked joiner gets a hint; move to team channels remembers where everyone came from', async () => {
+  const { w, q, qpress } = await openQ();
+  const j = qpress('q:join', U(55)); await m.handle(j);
+  assert.match(last(j, 'followUp').content, /link your Riot account/);
+  // two queued players sitting in different voice channels
+  reset();
+  const list = ids(2); seed(list);
+  const w2 = world(list);
+  w2.members.get(list[1]).voice.channelId = 'afk';
+  m.queues.set('qm2', { host: list[0], channelId: 'c2', ids: list.slice(), t: Date.now() });
+  await m.handle(mk('comp', { customId: 'q:start', user: list[0], guild: w2.guild, channel: w2.channel, message: { id: 'qm2' } }));
+  const s = m.sessions.get('msg1');
+  const mv = press(w2, 'move', list[0]); await m.handle(mv);
+  assert.match(last(mv, 'editReply'), /Moved 2/);
+  assert.ok(['vb', 'vr'].includes(w2.members.get(list[1]).voice.channelId));
+  const back = press(w2, 'back', list[0], { member: w2.members.get(list[0]) }); await m.handle(back);
+  assert.equal(w2.members.get(list[1]).voice.channelId, 'afk');
+  assert.equal(w2.members.get(list[0]).voice.channelId, 'vc1');
+  assert.ok(s.origin);
 });
 
 test('queue: draft works from a queue, close is host-only', async () => {

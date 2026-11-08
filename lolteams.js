@@ -369,7 +369,7 @@ async function loadCrests(app) {
   }
   console.log(`Rank crests loaded: ${Object.keys(crests).length}/${CREST_TIERS.length}`);
 }
-const BLUE = 0x3b82f6, RED = 0xef4444, BLURPLE = 0x5865f2;
+const BLUE = 0x3b82f6, RED = 0xef4444, BLURPLE = 0x5865f2, GOLD = 0xc8aa6e; // GOLD = League client accent
 
 function balanceLine(res) {
   const d = res.diff.toFixed(0), edge = res.avg[0] > res.avg[1] ? '🔵' : '🔴';
@@ -662,7 +662,7 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
   if (!s) return i.reply({ content: 'Expired. Run /lol and press Make teams again.', flags: EPH });
   s.t = Date.now();
   if (s.test && i.user.id !== s.owner) return i.reply({ content: 'This is someone else\'s practice lobby.', flags: EPH });
-  const id = i.customId, vcs = teamVcs(i.guild), canMove = !s.test && !s.queue && !!vcs;
+  const id = i.customId, vcs = teamVcs(i.guild), canMove = !s.test && !!vcs;
   const mayReport = s.res.teams.flat().some((p) => p.id === i.user.id) || isAdmin(i);
   const noReport = { content: 'Only players in this match (or Manage Server) can do that.', flags: EPH };
 
@@ -736,7 +736,10 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
       for (const p of team) {
         const m = await i.guild.members.fetch(p.id).catch(() => null);
         if (!m?.voice.channelId) { failed++; continue; }
-        try { await m.voice.setChannel(back ? s.vcId : vcs[side]); n++; } catch { failed++; }
+        if (!back) (s.origin ||= {})[p.id] = m.voice.channelId; // remember where each player came from
+        const to = back ? s.origin?.[p.id] || s.vcId : vcs[side];
+        if (!to) { failed++; continue; }
+        try { await m.voice.setChannel(to); n++; } catch { failed++; }
       }
     }
     if (n) { s.moved = !back; await i.message.edit(renderTeams(s, true)); }
@@ -744,29 +747,71 @@ async function onTeamButton(i) { // buttons + the draft menu on the public teams
   }
 }
 
-// ── queue: a public sign-up message people opt in to ─────────────────────
-const queues = new Map(); // queue message id -> { host, ids (join order), t }
+// ── queue: a standing public sign-up message people opt in to ────────────
+// Fills up passively; pops into teams automatically at 10 (or earlier via Start now), then resets for the next game.
+const queues = new Map(); // queue message id -> { host, channelId, url, ids (join order), t, games, last: { url, t } }
 const QMAX = 10;
+
+function roleSummary(ps) {
+  const n = Object.fromEntries([...ROLES, 'fill'].map((r) => [r, 0]));
+  for (const p of ps) n[p.roles?.[0] || 'fill']++;
+  const line = ROLES.map((r) => `${ROLE_ICON[r]}${n[r]}`).join(' ') + ` · Fill ${n.fill}`;
+  const missing = ps.length ? ROLES.filter((r) => !n[r] && !ps.some((p) => p.roles?.includes(r))) : [];
+  return { line, missing };
+}
 
 async function renderQueue(q, closedNote) {
   const byId = new Map((await buildPlayers(q.ids)).map((p) => [p.id, p]));
-  const lines = q.ids.map((id) => { const p = byId.get(id); return `${p.icon} <@${id}> · ${p.label}${p.roles?.[0] ? ` · ${ROLE_ICON[p.roles[0]] ?? ''}` : ''}`; });
-  const e = new EmbedBuilder().setColor(BLURPLE).setTitle('Custom game queue')
-    .setDescription(closedNote ?? (lines.length ? lines.join('\n') : 'Nobody yet. Press **Join** to opt in.'))
-    .setFooter({ text: closedNote ? 'Queue closed' : `${q.ids.length}/${QMAX} in queue · anyone can join and leave` });
+  const ps = q.ids.map((id) => byId.get(id));
+  const e = new EmbedBuilder().setColor(GOLD).setTitle('Custom game queue');
   const files = [];
   if (fs.existsSync(BANNER)) { e.setImage('attachment://banner.png'); files.push(new AttachmentBuilder(BANNER, { name: 'banner.png' })); }
-  if (closedNote) return { embeds: [e], files, components: [] };
+  if (closedNote) return { embeds: [e.setDescription(closedNote).setFooter({ text: 'Queue closed' })], files, components: [] };
+
+  const n = ps.length, left = QMAX - n;
+  const bar = '▰'.repeat(n) + '▱'.repeat(left);
+  const status = `${bar}  **${n}/${QMAX}** · ${left ? `${left} spot${left === 1 ? '' : 's'} left` : 'full'}`;
+  const list = ps.map((p, k) => `\`${String(k + 1).padStart(2)}\` ${p.icon} <@${p.id}> · ${p.label.replace(/ \d+LP|\*$/g, '')}` +
+    ` · ${p.roles?.[0] ? ROLE_ICON[p.roles[0]] : 'Fill'}`);
+  const parts = [status, n ? list.join('\n') : 'Nobody yet. Press **Join queue** to play.'];
+  if (n) {
+    const { line, missing } = roleSummary(ps);
+    const avg = ps.reduce((sum, p) => sum + p.rating, 0) / n;
+    parts.push(`-# Mains ${line} · avg ${ratingLabel(avg)}` + (missing.length && n >= 4 ? `\n-# Nobody plays ${missing.map(cap).join(' or ')} yet` : ''));
+  }
+  if (q.last) parts.push(`✅ Last match: [teams](${q.last.url}) <t:${Math.floor(q.last.t / 1000)}:R>`);
+  e.setDescription(parts.join('\n\n'))
+    .setFooter({ text: `Teams are made automatically at ${QMAX}. Anyone in the queue can start earlier.` });
   return { embeds: [e], files, components: [rowOf(
     btn('q:join', 'Join queue', ButtonStyle.Success), btn('q:leave', 'Leave', ButtonStyle.Danger),
-    btn('q:start', 'Make teams', ButtonStyle.Primary).setDisabled(q.ids.length < 2), btn('q:close', 'Close', ButtonStyle.Secondary))] };
+    btn('q:start', n >= 2 ? `Start now (${n})` : 'Start now', ButtonStyle.Primary).setDisabled(n < 2),
+    btn('q:me', 'My profile', ButtonStyle.Secondary), btn('q:close', 'Close', ButtonStyle.Secondary))] };
 }
 
 async function openQueue(i) {
+  const open = [...queues.values()].find((q) => q.channelId === i.channelId);
+  if (open) return i.reply({ content: `There's already a queue in this channel: ${open.url}`, flags: EPH });
   await i.deferReply();
-  const q = { host: i.user.id, ids: [], t: Date.now() };
+  const q = { host: i.user.id, channelId: i.channelId, ids: [], t: Date.now(), games: 0 };
   const msg = await i.editReply(await renderQueue(q));
+  q.url = msg.url;
   queues.set(msg.id, q);
+}
+
+// turn the queue into teams: post the teams message (pinging the players), then empty the queue for the next game
+async function popQueue(i, q) {
+  q.popping = true;
+  try {
+    const ids = q.ids.slice();
+    const s = { queue: true, owner: q.host, res: await makeTeams(ids), moved: false, t: Date.now() };
+    const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
+    const msg = await ch.send({ content: `🔔 **Match ready!** ${ids.map((id) => `<@${id}>`).join(' ')}`,
+      allowedMentions: { users: ids }, ...renderTeams(s, !!teamVcs(i.guild)) });
+    sessions.set(msg.id, s);
+    q.ids = q.ids.filter((id) => !ids.includes(id)); // anyone who joined while we were building stays queued
+    q.games = (q.games || 0) + 1;
+    q.last = { url: msg.url, t: Date.now() };
+  } finally { q.popping = false; }
 }
 
 async function onQueue(i) {
@@ -774,30 +819,34 @@ async function onQueue(i) {
   if (!q) return i.reply({ content: 'This queue has expired. Open a new one with /queue.', flags: EPH });
   q.t = Date.now();
   const id = i.customId, uid = i.user.id, inQ = q.ids.includes(uid);
-  const may = uid === q.host || inQ || isAdmin(i);
   const no = (content) => i.reply({ content, flags: EPH });
+  if (q.popping && id !== 'q:me') return no('Making teams… try again in a second.');
 
+  if (id === 'q:me') return i.reply({ ...panel(uid), flags: EPH });
   if (id === 'q:join') {
     if (inQ) return no('You are already in the queue.');
     if (q.ids.length >= QMAX) return no(`The queue is full (${QMAX}).`);
     q.ids.push(uid);
-  } else if (id === 'q:leave') {
+    await i.deferUpdate();
+    const u = db.users[uid];
+    if (!u?.puuid && u?.override == null)
+      i.followUp({ content: 'You joined. Press **My profile** to link your Riot account so teams are balanced by your rank.', flags: EPH }).catch(() => {});
+    if (q.ids.length >= QMAX) await popQueue(i, q);
+    return i.editReply(await renderQueue(q));
+  }
+  if (id === 'q:leave') {
     if (!inQ) return no('You are not in the queue.');
     q.ids = q.ids.filter((x) => x !== uid);
   } else if (id === 'q:close') {
     if (uid !== q.host && !isAdmin(i)) return no('Only the host (or Manage Server) can close the queue.');
     queues.delete(i.message.id);
-    return i.update(await renderQueue(q, 'Closed by the host.'));
+    return i.update(await renderQueue(q, `Closed by <@${uid}> after ${q.games || 0} game${q.games === 1 ? '' : 's'}.`));
   } else if (id === 'q:start') {
-    if (!may) return no('Join the queue to make teams.');
+    if (!inQ && uid !== q.host && !isAdmin(i)) return no('Join the queue to start the game.');
     if (q.ids.length < 2) return no('Need at least 2 players.');
     await i.deferUpdate();
-    const s = { queue: true, owner: q.host, res: await makeTeams(q.ids), moved: false, t: Date.now() };
-    const ch = i.channel ?? (await i.guild.channels.fetch(i.channelId));
-    const msg = await ch.send(renderTeams(s, false));
-    sessions.set(msg.id, s);
-    queues.delete(i.message.id);
-    return i.editReply(await renderQueue(q, `✅ [Teams are ready](${msg.url}) · ${q.ids.length} players.`));
+    await popQueue(i, q);
+    return i.editReply(await renderQueue(q));
   }
   await i.deferUpdate();
   return i.editReply(await renderQueue(q));
@@ -850,5 +899,5 @@ if (require.main === module) start();
 module.exports = {
   parseRiotId, parseRank, ratingLabel, toRating, pickSplit, toUnits, assignRoles, makeTeams, buildPlayers, compose,
   startDraft, draftPick, draftCaptain, pickTeam, applyResult, undoResult, boardEmbed, getRank, balance, fakePlayers, testLobbies,
-  teamVcs, queues, panel, loadCrests, crests, rankIcon, renderTeams, renderDraft, linkModal, rankModal, handle, db, sessions,
+  teamVcs, queues, renderQueue, panel, loadCrests, crests, rankIcon, renderTeams, renderDraft, linkModal, rankModal, handle, db, sessions,
 };
